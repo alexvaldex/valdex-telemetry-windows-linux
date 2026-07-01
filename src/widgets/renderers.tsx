@@ -1,0 +1,487 @@
+// src/widgets/renderers.tsx
+import React, { useMemo } from "react";
+import type { WidgetId } from "./registry";
+import type { TelemetryFrameV1 } from "../telemetry/types";
+import type { UnitSystem } from "../units";
+
+import { Canvas } from "@react-three/fiber";
+import { OrbitControls } from "@react-three/drei";
+
+
+
+/** --------- unit helpers (local, minimal) --------- */
+function mToFt(m: number) { return m * 3.280839895; }
+function mpsToFps(v: number) { return v * 3.280839895; }
+
+function fmt(n: number | undefined, digits = 2): string {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+  return n.toFixed(digits);
+}
+
+/** --------- plotting (simple SVG) --------- */
+function PlotLine(props: {
+  frames: TelemetryFrameV1[];
+  yKey: string;
+  yLabel: string;
+  color?: string;
+  height?: number;
+  transformY?: (v: number) => number;
+}) {
+  const h = props.height ?? 160;
+
+  const points = useMemo(() => {
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let i = 0; i < props.frames.length; i++) {
+      const f = props.frames[i] as any;
+      const yRaw = f[props.yKey];
+      const y = typeof yRaw === "number" ? yRaw : NaN;
+      if (!Number.isFinite(y)) continue;
+      xs.push(i);
+      ys.push(props.transformY ? props.transformY(y) : y);
+    }
+    if (xs.length < 2) return null;
+
+    const yMin = Math.min(...ys);
+    const yMax = Math.max(...ys);
+    const span = (yMax - yMin) || 1;
+
+    const W = 1000; // normalize, then scale via viewBox
+    const H = 1000;
+
+    const path = xs.map((x, idx) => {
+      const px = (idx / (xs.length - 1)) * W;
+      const py = H - ((ys[idx] - yMin) / span) * H;
+      return `${idx === 0 ? "M" : "L"} ${px.toFixed(1)} ${py.toFixed(1)}`;
+    }).join(" ");
+
+    return { path, yMin, yMax };
+  }, [props.frames, props.yKey, props.transformY]);
+
+  return (
+    <div style={{ borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(0,0,0,0.12)", padding: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+        <div style={{ fontWeight: 900 }}>{props.yLabel}</div>
+        {points ? (
+          <div style={{ fontSize: 12, opacity: 0.8 }}>
+            min {points.yMin.toFixed(2)} / max {points.yMax.toFixed(2)}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, opacity: 0.6 }}>no data</div>
+        )}
+      </div>
+
+      <svg viewBox="0 0 1000 1000" width="100%" height={h} style={{ display: "block" }}>
+        <path
+          d={points?.path ?? ""}
+          fill="none"
+          stroke={props.color ?? "rgba(122,162,255,0.95)"}
+          strokeWidth={10}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          opacity={0.95}
+        />
+      </svg>
+    </div>
+  );
+}
+
+/** --------- quaternion -> euler --------- */
+function quatToEuler(qw?: number, qx?: number, qy?: number, qz?: number) {
+  if (![qw, qx, qy, qz].every((n) => typeof n === "number" && Number.isFinite(n))) {
+    return null;
+  }
+  const w = qw as number, x = qx as number, y = qy as number, z = qz as number;
+
+  // roll (x-axis rotation)
+  const sinr_cosp = 2 * (w * x + y * z);
+  const cosr_cosp = 1 - 2 * (x * x + y * y);
+  const roll = Math.atan2(sinr_cosp, cosr_cosp);
+
+  // pitch (y-axis rotation)
+  const sinp = 2 * (w * y - z * x);
+  let pitch: number;
+  if (Math.abs(sinp) >= 1) pitch = Math.sign(sinp) * (Math.PI / 2);
+  else pitch = Math.asin(sinp);
+
+  // yaw (z-axis rotation)
+  const siny_cosp = 2 * (w * z + x * y);
+  const cosy_cosp = 1 - 2 * (y * y + z * z);
+  const yaw = Math.atan2(siny_cosp, cosy_cosp);
+
+  const rad2deg = 180 / Math.PI;
+  return { roll: roll * rad2deg, pitch: pitch * rad2deg, yaw: yaw * rad2deg };
+}
+
+/** --------- attitude instrument (SVG artificial horizon) --------- */
+function ArtificialHorizon(props: { rollDeg?: number; pitchDeg?: number }) {
+  const roll = Number.isFinite(props.rollDeg as number) ? (props.rollDeg as number) : 0;
+  const pitch = Number.isFinite(props.pitchDeg as number) ? (props.pitchDeg as number) : 0;
+
+  // scale pitch into pixels
+  const pitchPx = (-pitch / 45) * 80; // 45deg -> 80px
+  const cx = 160, cy = 110;
+  const r = 96;
+
+  return (
+    <div style={{ borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(0,0,0,0.12)", padding: 10 }}>
+      <div style={{ fontWeight: 900, marginBottom: 8 }}>Artificial Horizon</div>
+
+      <svg width="100%" viewBox="0 0 320 240" style={{ display: "block" }}>
+        <defs>
+          <clipPath id="clip">
+            <circle cx={cx} cy={cy} r={r} />
+          </clipPath>
+        </defs>
+
+        {/* outer ring */}
+        <circle cx={cx} cy={cy} r={r + 10} fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="8" />
+
+        {/* clipped horizon */}
+        <g clipPath="url(#clip)">
+          <g transform={`translate(${cx},${cy}) rotate(${roll}) translate(${-cx},${-cy})`}>
+            {/* sky */}
+            <rect x="0" y="0" width="320" height="240" fill="rgba(90,160,255,0.25)" />
+            {/* ground */}
+            <rect x="0" y={cy + pitchPx} width="320" height="240" fill="rgba(255,190,90,0.22)" />
+            {/* horizon line */}
+            <line
+              x1="0"
+              y1={cy + pitchPx}
+              x2="320"
+              y2={cy + pitchPx}
+              stroke="rgba(255,255,255,0.75)"
+              strokeWidth="3"
+            />
+
+            {/* pitch ladder */}
+            {[-30, -20, -10, 10, 20, 30].map((p) => {
+              const y = cy + pitchPx + (-p / 45) * 80;
+              const w = p % 20 === 0 ? 120 : 80;
+              return (
+                <g key={p} opacity={0.8}>
+                  <line x1={cx - w / 2} y1={y} x2={cx + w / 2} y2={y} stroke="rgba(255,255,255,0.5)" strokeWidth="2" />
+                  <text x={cx + w / 2 + 10} y={y + 4} fontSize="12" fill="rgba(255,255,255,0.65)">
+                    {p}
+                  </text>
+                </g>
+              );
+            })}
+          </g>
+        </g>
+
+        {/* fixed aircraft symbol */}
+        <g>
+          <line x1={cx - 50} y1={cy} x2={cx - 10} y2={cy} stroke="rgba(255,255,255,0.8)" strokeWidth="4" />
+          <line x1={cx + 10} y1={cy} x2={cx + 50} y2={cy} stroke="rgba(255,255,255,0.8)" strokeWidth="4" />
+          <line x1={cx - 10} y1={cy} x2={cx + 10} y2={cy} stroke="rgba(255,255,255,0.95)" strokeWidth="6" />
+          <line x1={cx} y1={cy} x2={cx} y2={cy + 18} stroke="rgba(255,255,255,0.85)" strokeWidth="4" />
+        </g>
+
+        {/* roll ticks */}
+        {[ -60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60 ].map((a) => {
+          const ang = (a - 90) * (Math.PI / 180);
+          const r1 = r + 2;
+          const r2 = r + (a % 30 === 0 ? 18 : 10);
+          const x1 = cx + r1 * Math.cos(ang);
+          const y1 = cy + r1 * Math.sin(ang);
+          const x2 = cx + r2 * Math.cos(ang);
+          const y2 = cy + r2 * Math.sin(ang);
+          return <line key={a} x1={x1} y1={y1} x2={x2} y2={y2} stroke="rgba(255,255,255,0.35)" strokeWidth="3" />;
+        })}
+      </svg>
+    </div>
+  );
+}
+
+/** --------- 3D rocket (quaternion-driven) --------- */
+function Rocket3D(props: { q: { w: number; x: number; y: number; z: number } | null }) {
+  // three.js uses (x,y,z,w)
+  const quat = props.q ? [props.q.x, props.q.y, props.q.z, props.q.w] as [number, number, number, number] : null;
+
+  return (
+    <div style={{ height: "100%", minHeight: 260, borderRadius: 12, overflow: "hidden", border: "1px solid rgba(255,255,255,0.10)" }}>
+      <Canvas camera={{ position: [2.6, 1.6, 2.6], fov: 50 }}>
+        <ambientLight intensity={0.6} />
+        <directionalLight position={[5, 6, 4]} intensity={0.9} />
+
+        {/* grid */}
+        <gridHelper args={[10, 20, "rgba(255,255,255,0.18)" as any, "rgba(255,255,255,0.08)" as any]} />
+
+        {/* rocket group */}
+        <group quaternion={quat ? (quat as any) : undefined}>
+          {/* body */}
+          <mesh position={[0, 0.6, 0]}>
+            <cylinderGeometry args={[0.08, 0.08, 1.2, 24]} />
+            <meshStandardMaterial color={"#cfd6e6"} metalness={0.25} roughness={0.45} />
+          </mesh>
+
+          {/* nose */}
+          <mesh position={[0, 1.25, 0]}>
+            <coneGeometry args={[0.09, 0.3, 24]} />
+            <meshStandardMaterial color={"#e9eefc"} metalness={0.15} roughness={0.35} />
+          </mesh>
+
+          {/* fins */}
+          {[0, 120, 240].map((deg) => (
+            <mesh key={deg} rotation={[0, (deg * Math.PI) / 180, 0]} position={[0.11, 0.1, 0]}>
+              <boxGeometry args={[0.02, 0.18, 0.22]} />
+              <meshStandardMaterial color={"#7aa2ff"} metalness={0.2} roughness={0.5} />
+            </mesh>
+          ))}
+
+          {/* axis indicator */}
+          <axesHelper args={[0.6]} />
+        </group>
+
+        <OrbitControls enablePan={false} />
+      </Canvas>
+    </div>
+  );
+}
+
+/** --------- renderer entry --------- */
+export function renderWidget(args: {
+  widgetId: WidgetId;
+  latest?: TelemetryFrameV1;
+  telemetry: { frames: TelemetryFrameV1[]; rawLines: string[] };
+  unitSystem: UnitSystem;
+  view: "card" | "instrument" | "plot";
+}) {
+  const { widgetId, latest, telemetry, unitSystem, view } = args;
+  const frames = telemetry.frames ?? [];
+
+  if (widgetId === "altitude.card") {
+    const altM = latest?.alt_m;
+    const v = typeof altM === "number" ? (unitSystem === "imperial" ? mToFt(altM) : altM) : undefined;
+    const u = unitSystem === "imperial" ? "ft" : "m";
+
+    if (view === "plot") {
+      return <PlotLine frames={frames} yKey="alt_m" yLabel={`Altitude (${u})`} transformY={(m) => (unitSystem === "imperial" ? mToFt(m) : m)} />;
+    }
+
+    if (view === "instrument") {
+      // simple tape-style
+      const value = typeof v === "number" ? v : NaN;
+      const pct = Number.isFinite(value) ? Math.max(0, Math.min(1, value / (unitSystem === "imperial" ? 5000 : 1500))) : 0;
+      return (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontWeight: 900, fontSize: 34 }}>{fmt(v, 0)} <span style={{ fontSize: 16, opacity: 0.8 }}>{u}</span></div>
+          <div style={{ height: 14, borderRadius: 999, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(0,0,0,0.10)" }}>
+            <div style={{ width: `${pct * 100}%`, height: "100%", borderRadius: 999, background: "rgba(122,162,255,0.9)" }} />
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.75 }}>Tape scales to ~{unitSystem === "imperial" ? "5000ft" : "1500m"}.</div>
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ display: "grid", gap: 8 }}>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>Altitude</div>
+        <div style={{ fontWeight: 900, fontSize: 34 }}>{fmt(v, 1)} <span style={{ fontSize: 16, opacity: 0.8 }}>{u}</span></div>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>t={fmt(latest?.t_ms, 0)} ms</div>
+      </div>
+    );
+  }
+
+  if (widgetId === "velocity.card") {
+    const vel = latest?.vel_mps;
+    const v = typeof vel === "number" ? (unitSystem === "imperial" ? mpsToFps(vel) : vel) : undefined;
+    const u = unitSystem === "imperial" ? "ft/s" : "m/s";
+
+    if (view === "plot") {
+      return <PlotLine frames={frames} yKey="vel_mps" yLabel={`Velocity (${u})`} transformY={(mps) => (unitSystem === "imperial" ? mpsToFps(mps) : mps)} />;
+    }
+
+    if (view === "instrument") {
+      const value = typeof v === "number" ? v : NaN;
+      const max = unitSystem === "imperial" ? 2000 : 600;
+      const pct = Number.isFinite(value) ? Math.max(0, Math.min(1, Math.abs(value) / max)) : 0;
+      return (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontWeight: 900, fontSize: 34 }}>{fmt(v, 1)} <span style={{ fontSize: 16, opacity: 0.8 }}>{u}</span></div>
+          <div style={{ height: 14, borderRadius: 999, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(0,0,0,0.10)" }}>
+            <div style={{ width: `${pct * 100}%`, height: "100%", borderRadius: 999, background: "rgba(122,162,255,0.9)" }} />
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.75 }}>Magnitude scaled to ~{max} {u}.</div>
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ display: "grid", gap: 8 }}>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>Velocity</div>
+        <div style={{ fontWeight: 900, fontSize: 34 }}>{fmt(v, 1)} <span style={{ fontSize: 16, opacity: 0.8 }}>{u}</span></div>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>Positive up; negative down.</div>
+      </div>
+    );
+  }
+
+  if (widgetId === "battery.card") {
+    const bv = latest?.batt_v;
+
+    if (view === "plot") {
+      return <PlotLine frames={frames} yKey="batt_v" yLabel={`Battery (V)`} transformY={(v) => v} />;
+    }
+
+    if (view === "instrument") {
+      const v = typeof bv === "number" ? bv : NaN;
+      const pct = Number.isFinite(v) ? Math.max(0, Math.min(1, (v - 3.2) / (4.2 - 3.2))) : 0;
+      return (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontWeight: 900, fontSize: 34 }}>{fmt(bv, 2)} <span style={{ fontSize: 16, opacity: 0.8 }}>V</span></div>
+          <div style={{ height: 14, borderRadius: 999, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(0,0,0,0.10)" }}>
+            <div style={{ width: `${pct * 100}%`, height: "100%", borderRadius: 999, background: "rgba(122,162,255,0.9)" }} />
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.75 }}>Gauge assumes ~1-cell range (3.2–4.2V). Your App settings do real %.</div>
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ display: "grid", gap: 8 }}>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>Battery</div>
+        <div style={{ fontWeight: 900, fontSize: 34 }}>{fmt(bv, 2)} <span style={{ fontSize: 16, opacity: 0.8 }}>V</span></div>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>Use battery profile in Settings for % + alerts.</div>
+      </div>
+    );
+  }
+
+  if (widgetId === "attitude.card") {
+    const e = quatToEuler(latest?.q_w, latest?.q_x, latest?.q_y, latest?.q_z);
+
+    if (view === "plot") {
+      // build pseudo-frames with derived roll/pitch/yaw in custom renderer
+      const rollFrames = frames.map((f) => ({ ...f, __roll: quatToEuler(f.q_w, f.q_x, f.q_y, f.q_z)?.roll } as any));
+      const pitchFrames = frames.map((f) => ({ ...f, __pitch: quatToEuler(f.q_w, f.q_x, f.q_y, f.q_z)?.pitch } as any));
+      const yawFrames = frames.map((f) => ({ ...f, __yaw: quatToEuler(f.q_w, f.q_x, f.q_y, f.q_z)?.yaw } as any));
+
+      return (
+        <div style={{ display: "grid", gap: 10 }}>
+          <PlotLine frames={rollFrames as any} yKey="__roll" yLabel="Roll (deg)" />
+          <PlotLine frames={pitchFrames as any} yKey="__pitch" yLabel="Pitch (deg)" />
+          <PlotLine frames={yawFrames as any} yKey="__yaw" yLabel="Yaw (deg)" />
+        </div>
+      );
+    }
+
+    if (view === "instrument") {
+      return (
+        <div style={{ display: "grid", gap: 10 }}>
+          <ArtificialHorizon rollDeg={e?.roll} pitchDeg={e?.pitch} />
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, opacity: 0.85, border: "1px solid rgba(255,255,255,0.10)", padding: "6px 10px", borderRadius: 999 }}>
+              Roll {e ? e.roll.toFixed(1) : "—"}°
+            </span>
+            <span style={{ fontSize: 12, opacity: 0.85, border: "1px solid rgba(255,255,255,0.10)", padding: "6px 10px", borderRadius: 999 }}>
+              Pitch {e ? e.pitch.toFixed(1) : "—"}°
+            </span>
+            <span style={{ fontSize: 12, opacity: 0.85, border: "1px solid rgba(255,255,255,0.10)", padding: "6px 10px", borderRadius: 999 }}>
+              Yaw {e ? e.yaw.toFixed(1) : "—"}°
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ display: "grid", gap: 10 }}>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>Attitude (Euler derived)</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <div style={{ borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)", padding: 10, background: "rgba(0,0,0,0.10)" }}>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>Roll</div>
+            <div style={{ fontWeight: 900, fontSize: 24 }}>{e ? e.roll.toFixed(1) : "—"}°</div>
+          </div>
+          <div style={{ borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)", padding: 10, background: "rgba(0,0,0,0.10)" }}>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>Pitch</div>
+            <div style={{ fontWeight: 900, fontSize: 24 }}>{e ? e.pitch.toFixed(1) : "—"}°</div>
+          </div>
+          <div style={{ borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)", padding: 10, background: "rgba(0,0,0,0.10)" }}>
+            <div style={{ fontSize: 12, opacity: 0.7 }}>Yaw</div>
+            <div style={{ fontWeight: 900, fontSize: 24 }}>{e ? e.yaw.toFixed(1) : "—"}°</div>
+          </div>
+        </div>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>Driven from q_w/q_x/q_y/q_z.</div>
+      </div>
+    );
+  }
+
+  if (widgetId === "vehicle.3d") {
+    const qOk =
+      typeof latest?.q_w === "number" &&
+      typeof latest?.q_x === "number" &&
+      typeof latest?.q_y === "number" &&
+      typeof latest?.q_z === "number";
+
+    const q = qOk ? { w: latest!.q_w!, x: latest!.q_x!, y: latest!.q_y!, z: latest!.q_z! } : null;
+
+    if (view === "plot") {
+      // for this widget, plot view is just euler
+      const e = quatToEuler(latest?.q_w, latest?.q_x, latest?.q_y, latest?.q_z);
+      return (
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontWeight: 900 }}>3D Orientation Source</div>
+          <div style={{ fontSize: 12, opacity: 0.8 }}>
+            q={q ? `${q.w.toFixed(3)}, ${q.x.toFixed(3)}, ${q.y.toFixed(3)}, ${q.z.toFixed(3)}` : "—"}
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.8 }}>
+            roll/pitch/yaw={e ? `${e.roll.toFixed(1)}°, ${e.pitch.toFixed(1)}°, ${e.yaw.toFixed(1)}°` : "—"}
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.65 }}>Switch to Instrument view for 3D.</div>
+        </div>
+      );
+    }
+
+    if (view === "card") {
+      const e = quatToEuler(latest?.q_w, latest?.q_x, latest?.q_y, latest?.q_z);
+      return (
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ fontSize: 12, opacity: 0.8 }}>3D Vehicle</div>
+          <div style={{ fontWeight: 900, fontSize: 18 }}>{q ? "Quaternion OK" : "No quaternion"}</div>
+          <div style={{ fontSize: 12, opacity: 0.75 }}>
+            {e ? `R ${e.roll.toFixed(1)}° / P ${e.pitch.toFixed(1)}° / Y ${e.yaw.toFixed(1)}°` : "—"}
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.65 }}>Use Instrument view to see the 3D model.</div>
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ height: "calc(100% - 4px)", display: "grid", gridTemplateRows: "auto 1fr", gap: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
+          <div style={{ fontWeight: 900 }}>3D Rocket</div>
+          <div style={{ fontSize: 12, opacity: 0.75 }}>{q ? "LIVE orientation" : "Waiting for q_w/x/y/z"}</div>
+        </div>
+        <Rocket3D q={q} />
+      </div>
+    );
+  }
+
+  // Minimal placeholders for GPS/IMU/raw (raw is handled specially in App.tsx)
+  if (widgetId === "gps.map") {
+    return (
+      <div style={{ display: "grid", gap: 8 }}>
+        <div style={{ fontWeight: 900 }}>GPS</div>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>lat {fmt(latest?.lat, 6)} / lon {fmt(latest?.lon, 6)}</div>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>fix {latest?.gps_fix ?? "—"} / sats {latest?.gps_sats ?? "—"}</div>
+        <div style={{ fontSize: 12, opacity: 0.65 }}>Map widget can be upgraded later (Leaflet/Mapbox).</div>
+      </div>
+    );
+  }
+
+  if (widgetId === "imu.card") {
+    return (
+      <div style={{ display: "grid", gap: 8 }}>
+        <div style={{ fontWeight: 900 }}>IMU</div>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>acc (x,y,z): {fmt(latest?.ax, 2)} {fmt(latest?.ay, 2)} {fmt(latest?.az, 2)}</div>
+        <div style={{ fontSize: 12, opacity: 0.8 }}>gyro (x,y,z): {fmt(latest?.gx, 2)} {fmt(latest?.gy, 2)} {fmt(latest?.gz, 2)}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ fontSize: 12, opacity: 0.75 }}>
+      No renderer for <code>{widgetId}</code>
+    </div>
+  );
+}
