@@ -127,7 +127,26 @@ function PlotLine(props: {
       return `${idx === 0 ? "M" : "L"} ${px.toFixed(1)} ${py.toFixed(1)}`;
     }).join(" ");
 
-    return { path, yMin, yMax };
+    // Flight-event markers, positioned on the same x-scale as the trace.
+    // xs[k] is the original frame index of the k-th plotted point; map each
+    // event frame to the nearest plotted point so markers line up with data.
+    const markers: Array<{ frac: number; label: string }> = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < props.frames.length; i++) {
+      const ev = (props.frames[i] as any)?.event;
+      if (typeof ev !== "string" || !ev.trim()) continue;
+      const label = ev.trim().toUpperCase();
+      if (seen.has(label)) continue;
+      seen.add(label);
+      let k = 0, best = Infinity;
+      for (let j = 0; j < xs.length; j++) {
+        const d = Math.abs(xs[j] - i);
+        if (d < best) { best = d; k = j; }
+      }
+      markers.push({ frac: k / (xs.length - 1), label });
+    }
+
+    return { path, yMin, yMax, markers };
   }, [props.frames, props.yKey, props.transformY]);
 
   return (
@@ -143,17 +162,54 @@ function PlotLine(props: {
         )}
       </div>
 
-      <svg viewBox="0 0 1000 1000" width="100%" height={h} preserveAspectRatio="none" style={{ display: "block" }}>
-        <path
-          d={points?.path ?? ""}
-          fill="none"
-          stroke={props.color ?? "var(--vx-blue-bright)"}
-          strokeWidth={8}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          opacity={0.95}
-        />
-      </svg>
+      <div style={{ position: "relative" }}>
+        <svg viewBox="0 0 1000 1000" width="100%" height={h} preserveAspectRatio="none" style={{ display: "block" }}>
+          <path
+            d={points?.path ?? ""}
+            fill="none"
+            stroke={props.color ?? "var(--vx-blue-bright)"}
+            strokeWidth={8}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            opacity={0.95}
+          />
+        </svg>
+
+        {/* Event markers overlaid on the trace */}
+        {points?.markers.map((m) => (
+          <div
+            key={m.label}
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              left: `${(m.frac * 100).toFixed(2)}%`,
+              borderLeft: "1px dashed var(--vx-caution)",
+              opacity: 0.7,
+              pointerEvents: "none",
+            }}
+          >
+            <span
+              style={{
+                position: "absolute",
+                top: 2,
+                left: m.frac > 0.85 ? "auto" : 3,
+                right: m.frac > 0.85 ? 3 : "auto",
+                fontSize: 9,
+                letterSpacing: "0.08em",
+                fontFamily: "var(--vx-font-mono)",
+                color: "var(--vx-caution)",
+                background: "rgba(4,7,14,0.75)",
+                padding: "1px 3px",
+                borderRadius: 2,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {m.label}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
