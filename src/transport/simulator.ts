@@ -12,6 +12,13 @@ const MAIN_VEL = -5; // m/s
 const TICK_MS = 50; // 20Hz emission rate
 const SIM_SPEED = 6; // sim-seconds per real-second, so a full flight plays out in ~20-30s
 
+// Launch pad location (near a typical HPR range) + wind drift for recovery realism
+const PAD_LAT = 32.9903;   // ~ FAR / Mojave-ish
+const PAD_LON = -106.9749;
+const M_PER_DEG_LAT = 111_320;
+const WIND_E_MPS = 4.5;    // eastward wind pushes vehicle downrange under chute
+const WIND_N_MPS = 1.5;
+
 export class SimulatorConnection implements Connection {
   status: ConnectionStatus = "disconnected";
 
@@ -26,6 +33,13 @@ export class SimulatorConnection implements Connection {
   private simMs = 0; // total elapsed sim time
   private battV = 8.4;
   private armed = false;
+
+  // Recovery / GPS drift state (meters east/north of pad)
+  private posE = 0;
+  private posN = 0;
+  // Pyro continuity (1 = good/charge present, 0 = fired/open)
+  private drogueCont: 0 | 1 = 1;
+  private mainCont: 0 | 1 = 1;
 
   onLine(cb: (line: string) => void): () => void {
     this.lineListeners.add(cb);
@@ -52,6 +66,10 @@ export class SimulatorConnection implements Connection {
     this.simMs = 0;
     this.battV = 8.4;
     this.armed = false;
+    this.posE = 0;
+    this.posN = 0;
+    this.drogueCont = 1;
+    this.mainCont = 1;
 
     this.setStatus("connected");
 
@@ -114,6 +132,7 @@ export class SimulatorConnection implements Connection {
           alt = this.phaseStartAlt + this.phaseStartVel * tApogee - 0.5 * COAST_DECEL * tApogee * tApogee;
           vel = 0;
           this.pendingEvent = "APOGEE";
+          this.drogueCont = 0; // drogue charge fires at apogee -> continuity opens
           this.phase = "drogue";
           this.phaseStartMs = this.simMs;
           this.phaseStartAlt = alt;
@@ -131,6 +150,7 @@ export class SimulatorConnection implements Connection {
         if (alt <= MAIN_DEPLOY_ALT_M) {
           alt = MAIN_DEPLOY_ALT_M;
           this.pendingEvent = "MAIN";
+          this.mainCont = 0; // main charge fires -> continuity opens
           this.phase = "main";
           this.phaseStartMs = this.simMs;
           this.phaseStartAlt = alt;
@@ -167,7 +187,18 @@ export class SimulatorConnection implements Connection {
     // slow battery drain over the flight
     this.battV = Math.max(6.6, 8.4 - this.simMs / 400000);
 
+    // Horizontal drift under wind: strongest while descending under chutes.
+    const dtSec = (TICK_MS * SIM_SPEED) / 1000;
+    const descending = vel < -0.5;
+    const driftFactor = descending ? 1 : this.phase === "boost" || this.phase === "coast" ? 0.15 : 0;
+    this.posE += WIND_E_MPS * driftFactor * dtSec;
+    this.posN += WIND_N_MPS * driftFactor * dtSec;
+
+    const lat = PAD_LAT + this.posN / M_PER_DEG_LAT;
+    const lon = PAD_LON + this.posE / (M_PER_DEG_LAT * Math.cos((PAD_LAT * Math.PI) / 180));
+
     const jitter = () => (Math.random() - 0.5) * 0.08;
+    const gpsJitter = () => (Math.random() - 0.5) * 0.00002;
 
     const frame: Record<string, unknown> = {
       v: 1,
@@ -179,6 +210,12 @@ export class SimulatorConnection implements Connection {
       ax: Math.round((ax + jitter()) * 1000) / 1000,
       ay: Math.round((ay + jitter()) * 1000) / 1000,
       az: Math.round((az + jitter()) * 1000) / 1000,
+      lat: Math.round((lat + gpsJitter()) * 1e6) / 1e6,
+      lon: Math.round((lon + gpsJitter()) * 1e6) / 1e6,
+      gps_fix: 3,
+      gps_sats: 9 + Math.round((Math.random() - 0.5) * 2),
+      pyro_drogue_cont: this.drogueCont,
+      pyro_main_cont: this.mainCont,
     };
 
     if (this.pendingEvent) {

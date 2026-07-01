@@ -7,6 +7,10 @@ import type { UnitSystem } from "../units";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 
+import { FlightSummaryWidget } from "./flightSummary";
+import { RangeMapWidget } from "./rangeMap";
+import { PyroPanelWidget } from "./pyroPanel";
+
 
 
 /** --------- unit helpers (local, minimal) --------- */
@@ -526,22 +530,35 @@ export function renderWidget(args: {
     );
   }
 
-  // Minimal placeholders for GPS/IMU/raw (raw is handled specially in App.tsx)
+  if (widgetId === "flight.summary") {
+    return <FlightSummaryWidget frames={frames} unitSystem={unitSystem} />;
+  }
+
+  if (widgetId === "pyro.panel") {
+    return <PyroPanelWidget frames={frames} latest={latest} />;
+  }
+
+  // GPS: offline range map + recovery bearing/distance (with a fix header)
   if (widgetId === "gps.map") {
     const fix = latest?.gps_fix;
     const sats = latest?.gps_sats;
     const fixState = typeof fix === "number" ? (fix >= 3 ? "var(--vx-go)" : fix >= 1 ? "var(--vx-caution)" : "var(--vx-crit)") : "var(--vx-fg-faint)";
-    return (
-      <div style={{ display: "grid", gap: 12, height: "100%", alignContent: "start" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <StatTile label="LATITUDE" value={fmt(latest?.lat, 6)} unit="°" />
-          <StatTile label="LONGITUDE" value={fmt(latest?.lon, 6)} unit="°" />
-          <StatTile label="FIX" value={fix !== undefined ? String(fix) : "—"} accent={fixState} />
-          <StatTile label="SATS" value={sats !== undefined ? String(sats) : "—"} />
+
+    if (view === "card") {
+      return (
+        <div style={{ display: "grid", gap: 12, height: "100%", alignContent: "start" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <StatTile label="LATITUDE" value={fmt(latest?.lat, 6)} unit="°" />
+            <StatTile label="LONGITUDE" value={fmt(latest?.lon, 6)} unit="°" />
+            <StatTile label="FIX" value={fix !== undefined ? String(fix) : "—"} accent={fixState} />
+            <StatTile label="SATS" value={sats !== undefined ? String(sats) : "—"} />
+          </div>
+          <div className="vx-label">Switch to Instrument/Plot view for the range map</div>
         </div>
-        <div className="vx-label">Map view (Leaflet/Mapbox) planned for a later milestone</div>
-      </div>
-    );
+      );
+    }
+
+    return <RangeMapWidget frames={frames} latest={latest} unitSystem={unitSystem} />;
   }
 
   if (widgetId === "imu.card") {

@@ -15,6 +15,7 @@ import type { Connection, ConnectionStatus } from "./transport/types";
 import { WebSerialConnection, isWebSerialSupported } from "./transport/webSerial";
 import { SimulatorConnection } from "./transport/simulator";
 import { liveStore } from "./telemetry/liveStore";
+import { saveFlight, listFlights, getFlight, deleteFlight, type FlightMeta } from "./telemetry/flightLog";
 
 /** ---------- Types ---------- */
 type WidgetInstance = { key: string; widgetId: WidgetId };
@@ -460,6 +461,10 @@ export default function App() {
   /** Settings modal */
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  /** Flight log */
+  const [flightLogOpen, setFlightLogOpen] = useState(false);
+  const [flights, setFlights] = useState<FlightMeta[]>([]);
+
   /** Command Palette */
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -494,6 +499,12 @@ export default function App() {
       connectionRef.current?.disconnect();
       connectionCleanupRef.current?.();
     };
+  }, []);
+
+  /** Load persisted flight log once on mount */
+  useEffect(() => {
+    refreshFlights();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Determine frames/latest to DISPLAY */
@@ -614,6 +625,8 @@ export default function App() {
     connectionCleanupRef.current = null;
     connectionRef.current = null;
     liveStore.setConnected(false);
+    // Auto-archive the just-completed session to the persistent flight log.
+    await saveCurrentFlight();
   }
 
   /** Widget ops */
@@ -729,13 +742,12 @@ export default function App() {
   }
 
   /** Playback loader (.jsonl) */
-  async function onLoadLogFile(file: File) {
-    const text = await file.text();
-    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  function loadLinesIntoPlayback(lines: string[], filename: string) {
     const frames: TelemetryFrameV1[] = [];
     const rawLines: string[] = [];
 
     for (const line of lines) {
+      if (!line.trim()) continue;
       rawLines.push(line);
       try {
         const obj = JSON.parse(line);
@@ -752,13 +764,59 @@ export default function App() {
       frames,
       rawLines,
       idx: 0,
-      filename: file.name,
+      filename,
       playing: false,
       speed: 1,
     });
 
     setFrozen(false);
     setFreezeIdx(null);
+  }
+
+  async function onLoadLogFile(file: File) {
+    const text = await file.text();
+    loadLinesIntoPlayback(text.split(/\r?\n/), file.name);
+  }
+
+  /** ---------- Persistent flight log ---------- */
+  async function refreshFlights() {
+    try {
+      setFlights(await listFlights());
+    } catch (e) {
+      console.error("[flightLog] list failed", e);
+    }
+  }
+
+  async function saveCurrentFlight() {
+    const raw = logLinesRef.current;
+    if (!raw.length) return;
+    try {
+      await saveFlight({ startedAt: sessionStartRef.current, rawLines: [...raw] });
+      await refreshFlights();
+    } catch (e) {
+      console.error("[flightLog] save failed", e);
+    }
+  }
+
+  async function loadFlightFromLog(id: string) {
+    try {
+      const rec = await getFlight(id);
+      if (rec) {
+        loadLinesIntoPlayback(rec.rawLines, rec.name);
+        setFlightLogOpen(false);
+      }
+    } catch (e) {
+      console.error("[flightLog] load failed", e);
+    }
+  }
+
+  async function deleteFlightFromLog(id: string) {
+    try {
+      await deleteFlight(id);
+      await refreshFlights();
+    } catch (e) {
+      console.error("[flightLog] delete failed", e);
+    }
   }
 
   function exitPlayback() {
@@ -1682,6 +1740,13 @@ export default function App() {
         </div>
 
         <div className="vx-toolbar-right">
+          <button
+            className="vx-btn vx-btn-primary"
+            onClick={() => { refreshFlights(); setFlightLogOpen(true); }}
+            title="Browse saved flights"
+          >
+            Flight Log{flights.length ? ` (${flights.length})` : ""}
+          </button>
           <button className="vx-btn" onClick={exportSessionJSONL} title={`Export raw telemetry (Ctrl+E) (${logCount})`}>Export JSONL</button>
           <button className="vx-btn" onClick={exportFramesCSV} title="Export frames as CSV (Ctrl+Shift+E)">Export CSV</button>
 
@@ -1877,6 +1942,88 @@ export default function App() {
           }}
         />
       )}
+
+      {/* Flight Log Modal */}
+      {flightLogOpen && (
+        <FlightLogModal
+          flights={flights}
+          onClose={() => setFlightLogOpen(false)}
+          onLoad={loadFlightFromLog}
+          onDelete={deleteFlightFromLog}
+        />
+      )}
+    </div>
+  );
+}
+
+/** ---------- FlightLogModal ---------- */
+function FlightLogModal(props: {
+  flights: FlightMeta[];
+  onClose: () => void;
+  onLoad: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  function fmtDur(ms?: number) {
+    if (typeof ms !== "number") return "—";
+    const s = ms / 1000;
+    const m = Math.floor(s / 60);
+    const r = Math.floor(s % 60);
+    return `${m}:${String(r).padStart(2, "0")}`;
+  }
+  return (
+    <div className="vx-modal-backdrop" onMouseDown={props.onClose}>
+      <div
+        className="vx-modal"
+        style={{ gridTemplateColumns: "1fr", height: "min(640px, 82vh)", width: "min(820px, 92vw)" }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "grid", gridTemplateRows: "auto 1fr", height: "100%", overflow: "hidden" }}>
+          <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--vx-line)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>Flight Log</div>
+              <div className="vx-label" style={{ marginTop: 4 }}>{props.flights.length} archived flight{props.flights.length === 1 ? "" : "s"} · stored locally</div>
+            </div>
+            <button className="vx-btn" onClick={props.onClose}>Close</button>
+          </div>
+
+          <div style={{ overflow: "auto", padding: 14 }}>
+            {props.flights.length === 0 ? (
+              <div style={{ display: "grid", placeItems: "center", height: "100%", color: "var(--vx-fg-faint)", textAlign: "center" }}>
+                <div>
+                  <div className="vx-label" style={{ fontSize: 12 }}>No saved flights yet</div>
+                  <div style={{ fontSize: 12, marginTop: 8, color: "var(--vx-fg-dim)" }}>
+                    Flights are archived automatically when you disconnect.
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 8 }}>
+                {props.flights.map((f) => (
+                  <div key={f.id} className="vx-card" style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, alignItems: "center" }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.name}</div>
+                      <div style={{ display: "flex", gap: 16, marginTop: 6, flexWrap: "wrap", fontFamily: "var(--vx-font-mono)", fontSize: 12, color: "var(--vx-fg-dim)" }}>
+                        <span>APOGEE <b style={{ color: "var(--vx-go)" }}>{typeof f.apogeeM === "number" ? `${f.apogeeM.toFixed(0)} m` : "—"}</b></span>
+                        <span>DUR <b style={{ color: "var(--vx-fg)" }}>{fmtDur(f.durationMs)}</b></span>
+                        <span>FRAMES <b style={{ color: "var(--vx-fg)" }}>{f.frameCount}</b></span>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button className="vx-btn vx-btn-primary" onClick={() => props.onLoad(f.id)}>Load</button>
+                      <button
+                        className="vx-btn vx-btn-danger"
+                        onClick={() => { if (window.confirm(`Delete flight "${f.name}"? This cannot be undone.`)) props.onDelete(f.id); }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
