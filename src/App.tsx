@@ -1,7 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import GridLayout, { type Layout } from "react-grid-layout";
 
-import { initialTelemetryState, pushFrame, pushRawLine } from "./telemetry/store";
 import { deriveCapabilities } from "./telemetry/capabilities";
 import type { TelemetryFrameV1 } from "./telemetry/types";
 
@@ -11,19 +10,11 @@ import { renderWidget } from "./widgets/renderers";
 
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
-import { output } from "three/tsl";
 
-/** ---------- Electron preload typing ---------- */
-declare global {
-  interface Window {
-    vx: {
-      serialList: () => Promise<Array<{ path: string }>>;
-      serialConnect: (opts: { path: string; baudRate: number }) => Promise<{ ok: boolean }>;
-      serialDisconnect: () => Promise<{ ok: boolean }>;
-      onTelemetryLine: (cb: (line: string) => void) => void | (() => void);
-    };
-  }
-}
+import type { Connection, ConnectionStatus } from "./transport/types";
+import { WebSerialConnection, isWebSerialSupported } from "./transport/webSerial";
+import { SimulatorConnection } from "./transport/simulator";
+import { liveStore } from "./telemetry/liveStore";
 
 /** ---------- Types ---------- */
 type WidgetInstance = { key: string; widgetId: WidgetId };
@@ -279,18 +270,21 @@ type DerivedEvent = {
 };
 
 const GRID_COLS = 12;
-const BAUD = 115200;
+const BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
 // Wrap GridLayout to avoid type errors in some TS setups
 const RGL: any = GridLayout;
 
 export default function App() {
-  /** Serial UI */
-  const [ports, setPorts] = useState<Array<{ path: string }>>([]);
-  const [selected, setSelected] = useState("");
+  /** Transport */
+  const [transportKind, setTransportKind] = useState<"simulator" | "serial">("simulator");
+  const [baudRate, setBaudRate] = useState(115200);
+  const [connStatus, setConnStatus] = useState<ConnectionStatus>("disconnected");
+  const connectionRef = useRef<Connection | null>(null);
+  const connectionCleanupRef = useRef<(() => void) | null>(null);
 
-  /** Live telemetry */
-  const [telemetry, setTelemetry] = useState(() => initialTelemetryState());
+  /** Live telemetry — external store, ticks independent of ingest rate */
+  const telemetry = useSyncExternalStore(liveStore.subscribe, liveStore.getState);
 
   /** Display Freeze */
   const [frozen, setFrozen] = useState(false);
@@ -453,38 +447,11 @@ export default function App() {
   const dtMsWindowRef = useRef<number[]>([]);
   const [linkHealthTick, setLinkHealthTick] = useState(0);
 
-  /** Telemetry ingest */
+  /** Disconnect any live connection on unmount */
   useEffect(() => {
-    const off = window.vx.onTelemetryLine((line: string) => {
-      logLinesRef.current.push(line);
-      if (logLinesRef.current.length > 200000) logLinesRef.current = logLinesRef.current.slice(-200000);
-      setLogCount(logLinesRef.current.length);
-
-      lastLineAtRef.current = performance.now();
-      setTelemetry((prev) => pushRawLine(prev, line));
-
-      try {
-        const obj = JSON.parse(line);
-        if (obj && obj.v === 1 && typeof obj.t_ms === "number") {
-          const now = performance.now();
-          const prevT = lastFrameAtRef.current;
-          if (prevT > 0) {
-            const dt = now - prevT;
-            dtMsWindowRef.current.push(dt);
-            if (dtMsWindowRef.current.length > 120) dtMsWindowRef.current.shift();
-          }
-          lastFrameAtRef.current = now;
-
-          setTelemetry((prev) => pushFrame(prev, obj as TelemetryFrameV1));
-          if (Math.random() < 0.08) setLinkHealthTick((x) => x + 1);
-        }
-      } catch {
-        // ignore
-      }
-    });
-
     return () => {
-      if (typeof off === "function") off();
+      connectionRef.current?.disconnect();
+      connectionCleanupRef.current?.();
     };
   }, []);
 
@@ -539,13 +506,14 @@ export default function App() {
 
   const caps = useMemo(() => deriveCapabilities(display.latest), [display.latest]);
 
-  /** Serial actions */
-  async function refreshPorts() {
-    const p = await window.vx.serialList();
-    setPorts(p);
-    if (!selected && p[0]) setSelected(p[0].path);
-  }
+  /** Transport actions */
   async function connect() {
+    if (connStatus !== "disconnected") return;
+    if (transportKind === "serial" && !isWebSerialSupported()) {
+      window.alert("Web Serial API not supported in this browser. Use Chrome or Edge, or switch to Simulator.");
+      return;
+    }
+
     sessionStartRef.current = Date.now();
     logLinesRef.current = [];
     setLogCount(0);
@@ -554,10 +522,57 @@ export default function App() {
     lastFrameAtRef.current = 0;
     dtMsWindowRef.current = [];
 
-    await window.vx.serialConnect({ path: selected, baudRate: BAUD });
+    liveStore.reset();
+
+    const conn: Connection = transportKind === "simulator" ? new SimulatorConnection() : new WebSerialConnection();
+
+    const offLine = conn.onLine((line: string) => {
+      logLinesRef.current.push(line);
+      if (logLinesRef.current.length > 200000) logLinesRef.current = logLinesRef.current.slice(-200000);
+      setLogCount(logLinesRef.current.length);
+
+      lastLineAtRef.current = performance.now();
+
+      const now = performance.now();
+      const prevT = lastFrameAtRef.current;
+      if (prevT > 0) {
+        const dt = now - prevT;
+        dtMsWindowRef.current.push(dt);
+        if (dtMsWindowRef.current.length > 120) dtMsWindowRef.current.shift();
+      }
+      lastFrameAtRef.current = now;
+      if (Math.random() < 0.08) setLinkHealthTick((x) => x + 1);
+
+      liveStore.ingest(line);
+    });
+
+    const offStatus = conn.onStatusChange((status) => {
+      setConnStatus(status);
+      liveStore.setConnected(status === "connected");
+    });
+
+    connectionRef.current = conn;
+    connectionCleanupRef.current = () => {
+      offLine();
+      offStatus();
+    };
+
+    try {
+      await conn.connect({ baudRate });
+    } catch (err) {
+      console.error("[connect] failed", err);
+      connectionCleanupRef.current?.();
+      connectionCleanupRef.current = null;
+      connectionRef.current = null;
+    }
   }
+
   async function disconnect() {
-    await window.vx.serialDisconnect();
+    await connectionRef.current?.disconnect();
+    connectionCleanupRef.current?.();
+    connectionCleanupRef.current = null;
+    connectionRef.current = null;
+    liveStore.setConnected(false);
   }
 
   /** Widget ops */
@@ -1149,6 +1164,7 @@ export default function App() {
           <h2 style={{ margin: 0 }}>Valdex Telemetry — Dev</h2>
           <span className="vx-chip">{modeChip}</span>
           <span className="vx-chip">t={Math.round(display.t_ms)}ms</span>
+          <span className="vx-chip" title="Frames per second from the active transport">{telemetry.packetsPerSec} pkt/s</span>
           <span className="vx-chip" title="Time since last telemetry line">Δline={Math.round(linkHealth.msSinceLine)}ms</span>
           <span className="vx-chip" title="Median dt between frames">dt≈{linkHealth.medianDt ? `${Math.round(linkHealth.medianDt)}ms` : "—"}</span>
           <span className="vx-chip" title="Drop/gap heuristic">gaps≈{linkHealth.lossScore}%</span>
@@ -1201,16 +1217,46 @@ export default function App() {
       {/* Toolbar (left connect/add, right export/log/settings) */}
       <div className="vx-toolbar">
         <div className="vx-toolbar-left">
-          <button className="vx-btn" onClick={refreshPorts} disabled={playback.mode === "playback"}>Refresh Ports</button>
-
-          <select className="vx-select" value={selected} onChange={(e) => setSelected(e.target.value)} disabled={playback.mode === "playback"}>
-            {ports.map((p) => (
-              <option key={p.path} value={p.path}>{p.path}</option>
-            ))}
+          <select
+            className="vx-select"
+            value={transportKind}
+            onChange={(e) => setTransportKind(e.target.value as "simulator" | "serial")}
+            disabled={playback.mode === "playback" || connStatus !== "disconnected"}
+            title="Transport"
+          >
+            <option value="simulator">Simulator</option>
+            <option value="serial">Serial{isWebSerialSupported() ? "" : " (unsupported browser)"}</option>
           </select>
 
-          <button className="vx-btn vx-btn-primary" onClick={connect} disabled={!selected || playback.mode === "playback"}>Connect</button>
-          <button className="vx-btn" onClick={disconnect} disabled={playback.mode === "playback"}>Disconnect</button>
+          {transportKind === "serial" && (
+            <select
+              className="vx-select"
+              value={String(baudRate)}
+              onChange={(e) => setBaudRate(Number(e.target.value))}
+              disabled={playback.mode === "playback" || connStatus !== "disconnected"}
+              title="Baud rate"
+            >
+              {BAUD_RATES.map((b) => (
+                <option key={b} value={b}>{b} baud</option>
+              ))}
+            </select>
+          )}
+
+          <button
+            className="vx-btn vx-btn-primary"
+            onClick={connect}
+            disabled={playback.mode === "playback" || connStatus !== "disconnected"}
+          >
+            {connStatus === "connecting" ? "Connecting…" : "Connect"}
+          </button>
+          <button
+            className="vx-btn"
+            onClick={disconnect}
+            disabled={playback.mode === "playback" || connStatus === "disconnected"}
+          >
+            Disconnect
+          </button>
+          <span className="vx-chip" title="Connection status">{connStatus.toUpperCase()}</span>
 
           {/* Quick Add */}
           <select
