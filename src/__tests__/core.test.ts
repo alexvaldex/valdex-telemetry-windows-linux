@@ -23,6 +23,7 @@ import { crc16ccitt, appendChecksum, verifyAndStrip } from "../telemetry/crc";
 import { MAX_FRAMES, MAX_EVENTS } from "../telemetry/store";
 import { getPadOrigin, resetPadOrigin } from "../telemetry/padOrigin";
 import { summarizeRawLines } from "../telemetry/flightLog";
+import { DEFAULT_SIM_PROFILE, simulatePreflight, windEN, airDensity, type SimProfile } from "../telemetry/flightSim";
 import { tiltDegFromQuat } from "../widgets/renderers";
 import type { TelemetryFrameV1 } from "../telemetry/types";
 
@@ -158,6 +159,60 @@ describe("tilt from quaternion", () => {
   it("is spin-invariant (roll about the long axis is not tilt)", () => {
     // 90° rotation about Y (the long axis) leaves the nose pointing up.
     expect(tiltDegFromQuat(Math.SQRT1_2, 0, Math.SQRT1_2, 0)).toBeCloseTo(0, 6);
+  });
+});
+
+describe("flight simulation physics", () => {
+  const base = (): SimProfile => structuredClone(DEFAULT_SIM_PROFILE);
+
+  it("predicts a plausible flight for the default J-motor rocket", () => {
+    const pred = simulatePreflight(base());
+    expect(pred.failsToLift).toBe(false);
+    expect(pred.apogeeM).toBeGreaterThan(200);
+    expect(pred.apogeeM).toBeLessThan(2000);
+    expect(pred.maxVelMps).toBeGreaterThan(50);
+    expect(pred.thrustToWeight).toBeGreaterThan(1);
+    expect(pred.flightS).toBeGreaterThan(pred.apogeeS);
+  });
+
+  it("flies higher on a hot day (density altitude)", () => {
+    const cold = base(); cold.env.tempC = 0;
+    const hot = base(); hot.env.tempC = 38;
+    expect(simulatePreflight(hot).apogeeM).toBeGreaterThan(simulatePreflight(cold).apogeeM);
+  });
+
+  it("flies lower when heavier", () => {
+    const light = base();
+    const heavy = base(); heavy.rocket.dryKg += 2;
+    expect(simulatePreflight(heavy).apogeeM).toBeLessThan(simulatePreflight(light).apogeeM);
+  });
+
+  it("drifts further in stronger wind, downwind of the pad", () => {
+    const calm = base(); calm.env.windMps = 2;
+    const windy = base(); windy.env.windMps = 10; windy.env.windDirDeg = 270; // from the west
+    const pc = simulatePreflight(calm);
+    const pw = simulatePreflight(windy);
+    expect(pw.driftM).toBeGreaterThan(pc.driftM);
+    // wind FROM 270° blows the rocket east → landing bearing ≈ 90°
+    expect(Math.abs(pw.driftBearingDeg - 90)).toBeLessThan(20);
+    expect(pw.landLon).toBeGreaterThan(windy.env.padLon);
+  });
+
+  it("flags a rocket the motor cannot lift", () => {
+    const brick = base(); brick.rocket.dryKg = 500;
+    expect(simulatePreflight(brick).failsToLift).toBe(true);
+  });
+
+  it("air density falls with altitude and heat", () => {
+    expect(airDensity(3000, 1400, 20)).toBeLessThan(airDensity(1400, 1400, 20));
+    expect(airDensity(1400, 1400, 40)).toBeLessThan(airDensity(1400, 1400, 0));
+  });
+
+  it("wind vector points downwind", () => {
+    const p = base(); p.env.windMps = 5; p.env.windDirDeg = 270;
+    const w = windEN(p);
+    expect(w.e).toBeGreaterThan(4.9); // blowing toward the east
+    expect(Math.abs(w.n)).toBeLessThan(0.1);
   });
 });
 

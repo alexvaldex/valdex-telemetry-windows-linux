@@ -1,5 +1,14 @@
 import type { Connection, ConnectOptions, ConnectionStatus } from "./types";
 import { appendChecksum } from "../telemetry/crc";
+import {
+  loadSimProfile,
+  initialFlightState,
+  stepFlight,
+  windEN,
+  driftFactor as simDriftFactor,
+  type SimProfile,
+  type FlightState,
+} from "../telemetry/flightSim";
 
 type Phase = "idle" | "boost" | "coast" | "drogue" | "main" | "landed";
 
@@ -113,6 +122,15 @@ export class SimulatorConnection implements Connection {
     this.seqSust = 0;
     this.seqBstr = 0;
 
+    // Fly the user's configured rocket/motor/day (Sim Setup).
+    this.profile = loadSimProfile();
+    this.fs = null;
+    this.eventQueue = [];
+    this.phaseT = 0;
+    const w = windEN(this.profile);
+    this.windE = w.e;
+    this.windN = w.n;
+
     this.setStatus("connected");
 
     this.timer = setInterval(() => this.tick(), TICK_MS);
@@ -175,115 +193,77 @@ export class SimulatorConnection implements Connection {
   private lastAlt = 0;
   private lastVel = 0;
 
+  // Physics-profile flight (user's rocket/motor/recovery/environment).
+  private profile: SimProfile = loadSimProfile();
+  private fs: FlightState | null = null;
+  private windE = 0;
+  private windN = 0;
+  private eventQueue: string[] = [];
+  private phaseT = 0; // seconds in the current phase (attitude animation)
+
   private tick() {
     this.simMs += TICK_MS * SIM_SPEED;
-    const dt = (this.simMs - this.phaseStartMs) / 1000; // seconds into current phase
+    const dtSec = (TICK_MS * SIM_SPEED) / 1000;
+    const p = this.profile;
 
-    let alt = this.phaseStartAlt;
-    let vel = this.phaseStartVel;
-    let ax = 0, ay = 0, az = G; // accel including gravity reaction, at rest az ~= +1g
+    let alt = 0;
+    let vel = 0;
+    const ax = 0, ay = 0;
+    let az = G; // accel incl. gravity reaction; at rest ≈ +1 g
 
-    switch (this.phase) {
-      case "idle": {
-        if (!this.armed && dt >= 1) {
-          this.armed = true;
-          this.pendingEvent = "ARMED";
-        }
-        if (dt >= 3) {
-          this.pendingEvent = "LIFTOFF";
-          this.phase = "boost";
-          this.phaseStartMs = this.simMs;
-          alt = 0;
-          vel = 0;
-        }
-        break;
+    const prevPhase = this.phase;
+
+    // Pad sequence: ARM at T-2, ignition at T=3 s — then physics takes over.
+    if (!this.fs) {
+      const tPad = this.simMs / 1000;
+      if (!this.armed && tPad >= 1) {
+        this.armed = true;
+        this.eventQueue.push("ARMED");
       }
-      case "boost": {
-        if (dt <= BOOST_DURATION_S) {
-          vel = this.phaseStartVel + BOOST_ACCEL * dt;
-          alt = this.phaseStartAlt + this.phaseStartVel * dt + 0.5 * BOOST_ACCEL * dt * dt;
-          az = G + BOOST_ACCEL;
-        } else {
-          this.pendingEvent = "BURNOUT";
-          this.phase = "coast";
-          this.phaseStartMs = this.simMs - (dt - BOOST_DURATION_S) * 1000;
-          this.phaseStartAlt = this.lastAlt;
-          this.phaseStartVel = this.lastVel;
-          alt = this.phaseStartAlt;
-          vel = this.phaseStartVel;
+      if (tPad >= 3) this.fs = initialFlightState(p);
+      this.phase = "idle";
+    }
 
-          // Staging: the spent booster separates and flies its own profile,
-          // transmitting on its own tracker (vid "BSTR").
+    if (this.fs) {
+      const st = stepFlight(this.fs, p, dtSec);
+      for (const ev of st.events) {
+        this.eventQueue.push(ev);
+        if (ev === "APOGEE") this.drogueCont = 0; // drogue charge fires
+        if (ev === "MAIN") this.mainCont = 0;     // main charge fires
+        if (ev === "BURNOUT" && p.twoStage) {
+          // Staging: spent booster separates onto its own tracker stream.
           this.booster = {
             phase: "coast",
-            alt: this.lastAlt,
-            vel: this.lastVel * 0.85, // separation scrubs a little velocity
+            alt: st.altAgl,
+            vel: st.vel * 0.85,
             posE: this.posE,
             posN: this.posN,
             pendingEvent: "SEPARATION",
           };
         }
-        break;
       }
-      case "coast": {
-        vel = this.phaseStartVel - COAST_DECEL * dt;
-        if (vel <= 0) {
-          const tApogee = this.phaseStartVel / COAST_DECEL;
-          alt = this.phaseStartAlt + this.phaseStartVel * tApogee - 0.5 * COAST_DECEL * tApogee * tApogee;
-          vel = 0;
-          this.pendingEvent = "APOGEE";
-          this.drogueCont = 0; // drogue charge fires at apogee -> continuity opens
-          this.phase = "drogue";
-          this.phaseStartMs = this.simMs;
-          this.phaseStartAlt = alt;
-          this.phaseStartVel = DROGUE_VEL;
-        } else {
-          alt = this.phaseStartAlt + this.phaseStartVel * dt - 0.5 * COAST_DECEL * dt * dt;
-        }
-        az = 0.7 * G; // light deceleration signature under thrust-free coast
-        break;
-      }
-      case "drogue": {
-        vel = DROGUE_VEL;
-        alt = this.phaseStartAlt + DROGUE_VEL * dt;
-        az = G;
-        // Emit a distinct DROGUE event ~1s after apogee (drogue canopy inflating).
-        if (!this.drogueEventSent && dt >= 1) {
-          this.drogueEventSent = true;
-          this.pendingEvent = "DROGUE";
-        }
-        if (alt <= MAIN_DEPLOY_ALT_M) {
-          alt = MAIN_DEPLOY_ALT_M;
-          this.pendingEvent = "MAIN";
-          this.mainCont = 0; // main charge fires -> continuity opens
-          this.phase = "main";
-          this.phaseStartMs = this.simMs;
-          this.phaseStartAlt = alt;
-          this.phaseStartVel = MAIN_VEL;
-        }
-        break;
-      }
-      case "main": {
-        vel = MAIN_VEL;
-        alt = this.phaseStartAlt + MAIN_VEL * dt;
-        az = G;
-        if (alt <= 0) {
-          alt = 0;
-          vel = 0;
-          this.pendingEvent = "LANDING";
-          this.phase = "landed";
-          this.phaseStartMs = this.simMs;
-          this.phaseStartAlt = 0;
-          this.phaseStartVel = 0;
-        }
-        break;
-      }
-      case "landed": {
-        alt = 0;
-        vel = 0;
-        az = G;
-        break;
-      }
+
+      alt = Math.max(0, st.altAgl);
+      vel = st.vel;
+      this.phase = st.phase === "pad" ? "idle" : st.phase;
+
+      // Vertical accel signature per phase.
+      if (this.phase === "boost") az = p.motor.avgThrustN / st.massKg;
+      else if (this.phase === "coast") az = 0.7 * G;
+      else az = G;
+    }
+
+    this.phaseT = this.phase === prevPhase ? this.phaseT + dtSec : 0;
+    const dt = this.phaseT; // seconds in current phase (attitude animation)
+
+    // DROGUE canopy event ~1 s after apogee (post phase-timer update).
+    if (this.phase === "drogue" && !this.drogueEventSent && this.phaseT >= 1) {
+      this.drogueEventSent = true;
+      this.eventQueue.push("DROGUE");
+    }
+
+    if (!this.pendingEvent && this.eventQueue.length) {
+      this.pendingEvent = this.eventQueue.shift();
     }
 
     this.lastAlt = alt;
@@ -292,30 +272,28 @@ export class SimulatorConnection implements Connection {
     // slow battery drain over the flight
     this.battV = Math.max(6.6, 8.4 - this.simMs / 400000);
 
-    // Horizontal drift under wind: strongest while descending under chutes.
-    const dtSec = (TICK_MS * SIM_SPEED) / 1000;
-    const descending = vel < -0.5;
-    const driftFactor = descending ? 1 : this.phase === "boost" || this.phase === "coast" ? 0.15 : 0;
-    this.posE += WIND_E_MPS * driftFactor * dtSec;
-    this.posN += WIND_N_MPS * driftFactor * dtSec;
+    // Horizontal drift under the configured wind: full push under canopy.
+    const df = this.fs ? simDriftFactor(this.fs.phase) : 0;
+    this.posE += this.windE * df * dtSec;
+    this.posN += this.windN * df * dtSec;
 
-    const lat = PAD_LAT + this.posN / M_PER_DEG_LAT;
-    const lon = PAD_LON + this.posE / (M_PER_DEG_LAT * Math.cos((PAD_LAT * Math.PI) / 180));
+    const lat = p.env.padLat + this.posN / M_PER_DEG_LAT;
+    const lon = p.env.padLon + this.posE / (M_PER_DEG_LAT * Math.cos((p.env.padLat * Math.PI) / 180));
 
     const jitter = () => (Math.random() - 0.5) * 0.08;
     const gpsJitter = () => (Math.random() - 0.5) * 0.00002;
 
     // Environment from the International Standard Atmosphere (troposphere model),
     // referenced to the pad altitude so it reads realistically through the flight.
-    const altAbs = PAD_ALT_M + Math.max(0, alt);
-    const temp_c = 15.0 - 0.0065 * altAbs + (Math.random() - 0.5) * 0.3;
+    const altAbs = p.env.padAltM + Math.max(0, alt);
+    const temp_c = p.env.tempC - 0.0065 * Math.max(0, alt) + (Math.random() - 0.5) * 0.3;
     const pressure_pa = 101325 * Math.pow(1 - 2.25577e-5 * altAbs, 5.25588);
     const humidity_pct = Math.max(8, Math.min(95, 55 - alt / 60 + (Math.random() - 0.5) * 2));
 
     // Simulated attitude: roll about the long axis + phase-dependent tilt.
     // Identity quaternion = nose straight up.
     let tiltDeg = 0.4 * Math.sin(this.simMs / 900); // slight breathing on the pad
-    let tiltAxisDeg = 25;
+    let tiltAxisDeg = p.env.windDirDeg; // weathercock into the wind
     let spinRateDps = 0; // roll rate about the long axis, deg/s (emitted as gy)
     switch (this.phase) {
       case "boost":
@@ -366,7 +344,7 @@ export class SimulatorConnection implements Connection {
       lon: Math.round((lon + gpsJitter()) * 1e6) / 1e6,
       gps_fix: 3,
       gps_sats: 9 + Math.round((Math.random() - 0.5) * 2),
-      gps_alt_m: Math.round((PAD_ALT_M + Math.max(0, alt) + (Math.random() - 0.5) * 6) * 10) / 10,
+      gps_alt_m: Math.round((p.env.padAltM + Math.max(0, alt) + (Math.random() - 0.5) * 6) * 10) / 10,
       temp_c: Math.round(temp_c * 10) / 10,
       pressure_pa: Math.round(pressure_pa),
       humidity_pct: Math.round(humidity_pct),
@@ -407,8 +385,8 @@ export class SimulatorConnection implements Connection {
     } else if (b.phase === "descent") {
       b.vel = -22; // tumbling / drogue-less terminal-ish descent
       b.alt += b.vel * dtSec;
-      b.posE += WIND_E_MPS * 0.7 * dtSec;
-      b.posN += WIND_N_MPS * 0.7 * dtSec;
+      b.posE += this.windE * 0.7 * dtSec;
+      b.posN += this.windN * 0.7 * dtSec;
       if (b.alt <= 0) {
         b.alt = 0;
         b.vel = 0;
@@ -418,8 +396,9 @@ export class SimulatorConnection implements Connection {
     }
     // landed: keep beaconing for recovery
 
-    const lat = PAD_LAT + b.posN / M_PER_DEG_LAT;
-    const lon = PAD_LON + b.posE / (M_PER_DEG_LAT * Math.cos((PAD_LAT * Math.PI) / 180));
+    const pe = this.profile.env;
+    const lat = pe.padLat + b.posN / M_PER_DEG_LAT;
+    const lon = pe.padLon + b.posE / (M_PER_DEG_LAT * Math.cos((pe.padLat * Math.PI) / 180));
 
     this.seqBstr += Math.random() < 0.03 ? 2 : 1; // weaker link drops more
     const frame: Record<string, unknown> = {
@@ -436,7 +415,7 @@ export class SimulatorConnection implements Connection {
       lon: Math.round((lon + (Math.random() - 0.5) * 0.00002) * 1e6) / 1e6,
       gps_fix: 3,
       gps_sats: 8 + Math.round((Math.random() - 0.5) * 2),
-      gps_alt_m: Math.round((PAD_ALT_M + Math.max(0, b.alt) + (Math.random() - 0.5) * 6) * 10) / 10,
+      gps_alt_m: Math.round((this.profile.env.padAltM + Math.max(0, b.alt) + (Math.random() - 0.5) * 6) * 10) / 10,
     };
     if (b.pendingEvent) {
       frame.event = b.pendingEvent;

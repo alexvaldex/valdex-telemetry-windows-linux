@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import type { TelemetryFrameV1 } from "../telemetry/types";
 import type { UnitSystem } from "../units";
 import { getPadOrigin } from "../telemetry/padOrigin";
+import { recoveryRouteUrl } from "../telemetry/flightSim";
 
 const M_PER_DEG_LAT = 111_320;
 const M_TO_FT = 3.280839895;
@@ -85,7 +86,7 @@ export function RangeMapWidget(props: { frames: TelemetryFrameV1[]; latest?: Tel
     });
     maxR *= 1.15;
 
-    return { tracks, maxR };
+    return { tracks, maxR, lat0, lon0 };
   }, [props.frames]);
 
   const size = 260;
@@ -161,6 +162,16 @@ export function RangeMapWidget(props: { frames: TelemetryFrameV1[]; latest?: Tel
               </div>
               <div style={{ fontFamily: "var(--vx-font-mono)", fontSize: 10, color: "var(--vx-fg-dim)" }}>
                 {t.lastLat.toFixed(5)}, {t.lastLon.toFixed(5)}
+                {" · "}
+                <a
+                  href={recoveryRouteUrl(model.lat0, model.lon0, t.lastLat, t.lastLon)}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: "var(--vx-blue-bright)" }}
+                  title="Walking directions from the pad to this vehicle (Google Maps)"
+                >
+                  Route ↗
+                </a>
               </div>
             </div>
           ))}
@@ -180,6 +191,16 @@ export function RangeMapWidget(props: { frames: TelemetryFrameV1[]; latest?: Tel
           </div>
           <div style={{ fontFamily: "var(--vx-font-mono)", fontSize: 11, color: "var(--vx-fg-dim)" }}>
             {model.tracks[0].lastLat.toFixed(5)}, {model.tracks[0].lastLon.toFixed(5)}
+            {" · "}
+            <a
+              href={recoveryRouteUrl(model.lat0, model.lon0, model.tracks[0].lastLat, model.tracks[0].lastLon)}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "var(--vx-blue-bright)" }}
+              title="Walking directions from the pad to the vehicle (Google Maps)"
+            >
+              Route ↗
+            </a>
           </div>
           <div className="vx-label" style={{ fontSize: 9 }}>Ring = {ringM >= 1000 ? `${(ringM / 1000).toFixed(1)} km` : `${ringM} m`}</div>
         </div>

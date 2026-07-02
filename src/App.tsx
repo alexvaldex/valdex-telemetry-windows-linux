@@ -33,6 +33,16 @@ import { speak } from "./audio/voice";
 import { loadAlertRules, saveAlertRules, ruleFires, RULE_FIELDS, type AlertRule } from "./telemetry/alertRules";
 import { setGhost } from "./telemetry/ghost";
 import { verifyAndStrip } from "./telemetry/crc";
+import {
+  loadSimProfile,
+  saveSimProfile,
+  simulatePreflight,
+  recoveryRouteUrl,
+  MOTORS,
+  SEASON_PRESETS,
+  type SimProfile,
+  type MotorSpec,
+} from "./telemetry/flightSim";
 import { computeFlightSummary } from "./widgets/flightSummary";
 
 /** ---------- Types ---------- */
@@ -544,6 +554,9 @@ export default function App() {
   /** Radio config panel */
   const [radioOpen, setRadioOpen] = useState(false);
 
+  /** Flight-sim setup (rocket / motor / recovery / day) */
+  const [simSetupOpen, setSimSetupOpen] = useState(false);
+
 
   /** Flight comparison overlay: a reference flight drawn as a dim dashed
       trace on every plot, liftoff-aligned to the current flight. */
@@ -613,6 +626,26 @@ export default function App() {
       localStorage.setItem("vx.fieldContrast", next ? "1" : "0");
       return next;
     });
+  }
+
+  /** Whole-console zoom (like browser zoom) — sizes every panel at once. */
+  const [uiZoom, setUiZoom] = useState<number>(() => {
+    const z = Number(localStorage.getItem("vx.uiZoom"));
+    return Number.isFinite(z) && z >= 0.5 && z <= 1.6 ? z : 1;
+  });
+  useEffect(() => {
+    (document.body.style as CSSStyleDeclaration & { zoom?: string }).zoom = String(uiZoom);
+  }, [uiZoom]);
+  function adjustZoom(delta: number) {
+    setUiZoom((z) => {
+      const next = Math.round(Math.min(1.4, Math.max(0.6, z + delta)) * 100) / 100;
+      localStorage.setItem("vx.uiZoom", String(next));
+      return next;
+    });
+  }
+  function resetZoom() {
+    setUiZoom(1);
+    localStorage.setItem("vx.uiZoom", "1");
   }
   function toggleVoice() {
     setVoiceOn((v) => {
@@ -1005,13 +1038,28 @@ export default function App() {
     return key;
   }
 
-  /** Per-widget lock: RGL `static` items can't be dragged or resized, so
-      canvas interactions (3D orbit) can never move the widget. */
+  /** Per-widget lock. Kept in its OWN persisted set and applied to the grid
+      at render time — storing `static` inside the layout got round-tripped
+      through RGL's onLayoutChange and intermittently lost (the "glitchy
+      lock"). This way the pin can never be dropped by a grid update. */
+  const [pinnedWidgets, setPinnedWidgets] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("vx.pinnedWidgets") || "[]") as string[]); } catch { return new Set(); }
+  });
   function toggleWidgetPin(key: string) {
-    const next = layout.map((l) => (l.i === key ? ({ ...l, static: !(l as any).static } as any) : l));
-    setLayout(next);
-    persist(instances, next);
+    setPinnedWidgets((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      localStorage.setItem("vx.pinnedWidgets", JSON.stringify([...next]));
+      return next;
+    });
   }
+
+  // Layout handed to the grid: pin state overrides `static` deterministically.
+  const rglLayout = useMemo(
+    () => layout.map((l) => ({ ...l, static: pinnedWidgets.has(l.i) })),
+    [layout, pinnedWidgets]
+  );
 
   /** Send a command line to the connected device (TX console). */
   async function sendCommand(cmd: string) {
@@ -1026,6 +1074,13 @@ export default function App() {
 
   function removeWidget(key: string) {
     if (flightMode) return; // hard lock: no removing
+
+    if (pinnedWidgets.has(key)) {
+      const next = new Set(pinnedWidgets);
+      next.delete(key);
+      setPinnedWidgets(next);
+      localStorage.setItem("vx.pinnedWidgets", JSON.stringify([...next]));
+    }
 
     const nextInstances = instances.filter((x) => x.key !== key);
     const nextLayout = layout.filter((l) => l.i !== key);
@@ -2532,6 +2587,14 @@ ${trkpts}
             >
               {voiceOn ? "🔈 Voice" : "🔇 Voice"}
             </button>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 2 }} title="Console zoom — scales the whole display">
+              <button className="vx-tbtn" onClick={() => adjustZoom(-0.1)} style={{ height: 34 }}>−</button>
+              <button className="vx-tbtn" onClick={resetZoom} style={{ height: 34, minWidth: 44 }} title="Reset zoom to 100%">
+                {Math.round(uiZoom * 100)}%
+              </button>
+              <button className="vx-tbtn" onClick={() => adjustZoom(0.1)} style={{ height: 34 }}>+</button>
+            </span>
+
             <button
               className={`vx-btn ${fieldMode ? "vx-btn-primary" : ""}`}
               onClick={toggleFieldMode}
@@ -2602,6 +2665,17 @@ ${trkpts}
             <option value="simulator">Simulator</option>
             <option value="serial">Serial{isTauri() ? " (native)" : isWebSerialSupported() ? "" : " (unsupported browser)"}</option>
           </select>
+
+          {transportKind === "simulator" && (
+            <button
+              className="vx-btn"
+              onClick={() => setSimSetupOpen(true)}
+              disabled={connStatus !== "disconnected"}
+              title="Configure the simulated flight — your rocket, motor, recovery, and the day's weather"
+            >
+              Sim Setup
+            </button>
+          )}
 
           {transportKind === "serial" && isTauri() && (
             <>
@@ -2812,7 +2886,7 @@ ${trkpts}
         <RGL
           {...({
             className: "layout",
-            layout,
+            layout: rglLayout,
             cols: GRID_COLS,
             rowHeight: 30,
             width: gridWidth,
@@ -2827,8 +2901,10 @@ ${trkpts}
             isResizable: isLayoutEditable,
             onLayoutChange: (nextLayout: any) => {
               if (!isLayoutEditable) return;
-              setLayout(nextLayout as Layout);
-              persist(instances, nextLayout as Layout);
+              // Strip the render-time pin override before persisting.
+              const base = (nextLayout as any[]).map(({ static: _s, ...rest }) => rest) as Layout;
+              setLayout(base);
+              persist(instances, base);
             },
           } as any)}
         >
@@ -2843,7 +2919,7 @@ ${trkpts}
                 globalUnits={globalUnits}
                 settings={widgetSettings[inst.key]}
                 locked={!isLayoutEditable} // locked in flight + playback
-                pinned={!!(layout.find((l) => l.i === inst.key) as any)?.static}
+                pinned={pinnedWidgets.has(inst.key)}
                 connected={connStatus === "connected"}
                 allFrames={sourceFrames}
                 seenVids={seenVids}
@@ -2936,6 +3012,9 @@ ${trkpts}
       {alertRulesOpen && (
         <AlertRulesModal rules={alertRules} onChange={updateAlertRules} onClose={() => setAlertRulesOpen(false)} />
       )}
+
+      {/* Sim Setup Modal */}
+      {simSetupOpen && <SimSetupModal onClose={() => setSimSetupOpen(false)} />}
 
       {/* Radio Config Modal */}
       {radioOpen && (
@@ -3121,6 +3200,227 @@ function ContextMenu(props: {
         <div>
           <div style={{ fontWeight: 900 }}>Close</div>
           <div className="vx-menu-muted">Esc</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** ---------- SimSetupModal — flight simulation configuration ---------- */
+function SimNum(props: { label: string; value: number; onChange: (v: number) => void; step?: number; unit?: string; hint?: string }) {
+  return (
+    <label style={{ display: "grid", gap: 4 }} title={props.hint}>
+      <span className="vx-label">{props.label}{props.unit ? ` (${props.unit})` : ""}</span>
+      <input
+        className="vx-input"
+        type="number"
+        step={props.step ?? "any"}
+        value={Number.isFinite(props.value) ? props.value : ""}
+        onChange={(e) => props.onChange(Number(e.target.value))}
+      />
+    </label>
+  );
+}
+
+function SimSetupModal(props: { onClose: () => void }) {
+  const [prof, setProf] = useState<SimProfile>(() => loadSimProfile());
+  const isCustomMotor = !MOTORS.some((m) => m.name === prof.motor.name);
+
+  function update(patch: Partial<SimProfile>) {
+    setProf((prev) => {
+      const next: SimProfile = {
+        ...prev,
+        ...patch,
+        rocket: { ...prev.rocket, ...(patch.rocket ?? {}) },
+        motor: { ...prev.motor, ...(patch.motor ?? {}) },
+        recovery: { ...prev.recovery, ...(patch.recovery ?? {}) },
+        env: { ...prev.env, ...(patch.env ?? {}) },
+      };
+      saveSimProfile(next);
+      return next;
+    });
+  }
+
+  const pred = useMemo(() => {
+    try { return simulatePreflight(prof); } catch { return null; }
+  }, [prof]);
+
+  const m2ft = (m: number) => `${m.toFixed(0)} m / ${(m * 3.28084).toFixed(0)} ft`;
+  const compass = (b: number) => ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(b / 45) % 8];
+
+  return (
+    <div className="vx-modal-backdrop" onMouseDown={props.onClose}>
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        style={{
+          width: "min(920px, 96vw)", maxHeight: "90vh", overflow: "auto",
+          background: "rgba(7,11,22,0.98)", border: "1px solid var(--vx-line-strong)",
+          borderRadius: 4, boxShadow: "0 22px 70px rgba(0,0,0,0.75)", padding: 20,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>🧮 Flight Simulation Setup</div>
+          <button className="vx-xbtn" onClick={props.onClose}>×</button>
+        </div>
+        <div style={{ fontSize: 12, color: "var(--vx-fg-dim)", lineHeight: 1.6, marginBottom: 14 }}>
+          Model <b style={{ color: "var(--vx-fg)" }}>your</b> rocket on <b style={{ color: "var(--vx-fg)" }}>your</b> launch day. The Simulator
+          transport flies this profile with real physics (thrust, mass depletion, drag against the day\u2019s air density, wind drift) —
+          predictions update live as you tune it.
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          {/* Left column: vehicle + recovery */}
+          <div style={{ display: "grid", gap: 10, alignContent: "start" }}>
+            <div className="vx-card" style={{ display: "grid", gap: 10 }}>
+              <div className="vx-label">Rocket</div>
+              <input className="vx-input" value={prof.name} onChange={(e) => update({ name: e.target.value })} placeholder="Vehicle name" />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                <SimNum label="Dry mass" unit="kg" step={0.1} value={prof.rocket.dryKg} onChange={(v) => update({ rocket: { ...prof.rocket, dryKg: v } })} hint="Mass without propellant" />
+                <SimNum label="Diameter" unit="mm" step={1} value={prof.rocket.diameterMm} onChange={(v) => update({ rocket: { ...prof.rocket, diameterMm: v } })} />
+                <SimNum label="Cd" step={0.05} value={prof.rocket.cd} onChange={(v) => update({ rocket: { ...prof.rocket, cd: v } })} hint="Drag coefficient — typical HPR 0.4–0.6" />
+              </div>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12, color: "var(--vx-fg-dim)" }}>
+                <input type="checkbox" checked={prof.twoStage} onChange={(e) => update({ twoStage: e.target.checked })} />
+                Two-stage (booster separates at burnout on its own tracker)
+              </label>
+            </div>
+
+            <div className="vx-card" style={{ display: "grid", gap: 10 }}>
+              <div className="vx-label">Motor</div>
+              <select
+                className="vx-select"
+                value={isCustomMotor ? "__custom" : prof.motor.name}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "__custom") update({ motor: { ...prof.motor, name: "Custom" } });
+                  else {
+                    const m = MOTORS.find((x) => x.name === v)!;
+                    update({ motor: { ...m } });
+                  }
+                }}
+              >
+                {MOTORS.map((m) => (
+                  <option key={m.name} value={m.name}>{m.name} — {m.impulseNs} Ns</option>
+                ))}
+                <option value="__custom">Custom…</option>
+              </select>
+              {isCustomMotor && (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <SimNum label="Total impulse" unit="Ns" step={10} value={prof.motor.impulseNs} onChange={(v) => update({ motor: { ...prof.motor, impulseNs: v, avgThrustN: prof.motor.burnS > 0 ? v / prof.motor.burnS : prof.motor.avgThrustN } })} />
+                  <SimNum label="Burn time" unit="s" step={0.1} value={prof.motor.burnS} onChange={(v) => update({ motor: { ...prof.motor, burnS: v, avgThrustN: v > 0 ? prof.motor.impulseNs / v : prof.motor.avgThrustN } })} />
+                  <SimNum label="Avg thrust" unit="N" step={5} value={prof.motor.avgThrustN} onChange={(v) => update({ motor: { ...prof.motor, avgThrustN: v } })} />
+                  <SimNum label="Propellant" unit="kg" step={0.01} value={prof.motor.propKg} onChange={(v) => update({ motor: { ...prof.motor, propKg: v } })} />
+                </div>
+              )}
+            </div>
+
+            <div className="vx-card" style={{ display: "grid", gap: 10 }}>
+              <div className="vx-label">Recovery</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                <SimNum label="Drogue rate" unit="m/s" step={1} value={prof.recovery.drogueDescentMps} onChange={(v) => update({ recovery: { ...prof.recovery, drogueDescentMps: v } })} />
+                <SimNum label="Main rate" unit="m/s" step={0.5} value={prof.recovery.mainDescentMps} onChange={(v) => update({ recovery: { ...prof.recovery, mainDescentMps: v } })} />
+                <SimNum label="Main deploy" unit="m AGL" step={10} value={prof.recovery.mainDeployAltM} onChange={(v) => update({ recovery: { ...prof.recovery, mainDeployAltM: v } })} />
+              </div>
+            </div>
+
+            <div className="vx-card" style={{ display: "grid", gap: 10 }}>
+              <div className="vx-label">Launch day · site & weather</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {SEASON_PRESETS.map((sp) => (
+                  <button
+                    key={sp.name}
+                    className={`vx-btn ${prof.env.month === sp.month ? "vx-btn-primary" : ""}`}
+                    onClick={() => update({ env: { ...prof.env, month: sp.month, tempC: sp.tempC } })}
+                    title={`${sp.name}: ${sp.tempC} °C surface`}
+                  >
+                    {sp.name}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                <SimNum label="Pad elev" unit="m MSL" step={10} value={prof.env.padAltM} onChange={(v) => update({ env: { ...prof.env, padAltM: v } })} hint="Higher pad + hotter day = thinner air = higher apogee" />
+                <SimNum label="Temp" unit="°C" step={1} value={prof.env.tempC} onChange={(v) => update({ env: { ...prof.env, tempC: v } })} />
+                <SimNum label="Wind" unit="m/s" step={0.5} value={prof.env.windMps} onChange={(v) => update({ env: { ...prof.env, windMps: v } })} />
+                <SimNum label="Wind from" unit="°" step={5} value={prof.env.windDirDeg} onChange={(v) => update({ env: { ...prof.env, windDirDeg: ((v % 360) + 360) % 360 } })} hint="Meteorological: direction the wind blows FROM" />
+                <SimNum label="Pad lat" step={0.0001} value={prof.env.padLat} onChange={(v) => update({ env: { ...prof.env, padLat: v } })} />
+                <SimNum label="Pad lon" step={0.0001} value={prof.env.padLon} onChange={(v) => update({ env: { ...prof.env, padLon: v } })} />
+              </div>
+            </div>
+          </div>
+
+          {/* Right column: live predictions + recovery plan */}
+          <div style={{ display: "grid", gap: 10, alignContent: "start" }}>
+            <div className="vx-card" style={{ display: "grid", gap: 10 }}>
+              <div className="vx-label">Predicted flight — this rocket, this day</div>
+              {pred ? (
+                pred.failsToLift ? (
+                  <div style={{ color: "var(--vx-crit)", fontWeight: 700, letterSpacing: "0.08em", fontSize: 13 }}>
+                    ✗ WILL NOT LIFT — thrust/weight {pred.thrustToWeight.toFixed(2)} ≤ 1. Bigger motor or lighter rocket.
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontFamily: "var(--vx-font-mono)", fontSize: 13 }}>
+                    <div><span className="vx-label">APOGEE</span><br /><b style={{ fontSize: 20, color: "var(--vx-blue-bright)" }}>{m2ft(pred.apogeeM)}</b></div>
+                    <div><span className="vx-label">MAX VELOCITY</span><br /><b style={{ fontSize: 20 }}>{pred.maxVelMps.toFixed(0)} m/s{pred.maxMach >= 0.3 ? ` · M${pred.maxMach.toFixed(2)}` : ""}</b></div>
+                    <div><span className="vx-label">MAX ACCEL</span><br /><b>{pred.maxAccelG.toFixed(1)} g</b></div>
+                    <div>
+                      <span className="vx-label">THRUST/WEIGHT</span><br />
+                      <b style={{ color: pred.thrustToWeight < 3 ? "var(--vx-crit)" : pred.thrustToWeight < 5 ? "var(--vx-caution)" : "var(--vx-go)" }}>
+                        {pred.thrustToWeight.toFixed(1)} {pred.thrustToWeight < 5 ? "· rail-exit caution" : ""}
+                      </b>
+                    </div>
+                    <div><span className="vx-label">TO APOGEE</span><br /><b>{pred.apogeeS.toFixed(1)} s</b></div>
+                    <div><span className="vx-label">TOTAL FLIGHT</span><br /><b>{(pred.flightS / 60).toFixed(1)} min</b></div>
+                    <div><span className="vx-label">BURNOUT ALT</span><br /><b>{m2ft(pred.burnoutAltM)}</b></div>
+                  </div>
+                )
+              ) : (
+                <div style={{ color: "var(--vx-fg-faint)", fontSize: 12 }}>Prediction unavailable — check inputs.</div>
+              )}
+            </div>
+
+            {pred && !pred.failsToLift && (
+              <div className="vx-card" style={{ display: "grid", gap: 10 }}>
+                <div className="vx-label">Recovery plan — where it lands</div>
+                <div style={{ fontFamily: "var(--vx-font-mono)", fontSize: 13 }}>
+                  Drift <b style={{ color: "var(--vx-caution)", fontSize: 18 }}>{m2ft(pred.driftM)}</b> at{" "}
+                  <b>{pred.driftBearingDeg.toFixed(0)}° {compass(pred.driftBearingDeg)}</b> of the pad
+                </div>
+                <div style={{ fontFamily: "var(--vx-font-mono)", fontSize: 12, color: "var(--vx-fg-dim)" }}>
+                  Predicted landing: {pred.landLat.toFixed(5)}, {pred.landLon.toFixed(5)}
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <a
+                    className="vx-btn vx-btn-primary"
+                    style={{ textDecoration: "none" }}
+                    href={recoveryRouteUrl(prof.env.padLat, prof.env.padLon, pred.landLat, pred.landLon)}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Walking directions from your pad to the predicted landing point — rehearse the recovery"
+                  >
+                    🗺 Rehearse recovery route in Google Maps
+                  </a>
+                  <a
+                    className="vx-btn"
+                    style={{ textDecoration: "none" }}
+                    href={`https://www.google.com/maps/search/?api=1&query=${pred.landLat.toFixed(6)},${pred.landLon.toFixed(6)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="View the predicted landing area (satellite view for terrain)"
+                  >
+                    Landing area ↗
+                  </a>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--vx-fg-faint)" }}>
+                  Re-run with the day\u2019s forecast wind before you fly — same rocket, different day, different walk.
+                </div>
+              </div>
+            )}
+
+            <div style={{ fontSize: 11, color: "var(--vx-fg-faint)" }}>
+              Saved automatically. The Simulator transport flies this profile on the next Connect — telemetry, events, GPS
+              track, and landing point will match these predictions.
+            </div>
+          </div>
         </div>
       </div>
     </div>
