@@ -9,9 +9,10 @@ export type WidgetId =
   | "gps.map"
   | "imu.card"
   | "flight.summary"
-  | "pyro.panel";
+  | "pyro.panel"
+  | "env.card";
 
-export type WidgetCategory = "Core" | "Navigation" | "IMU" | "Attitude" | "Viz" | "Flight" | "Safety";
+export type WidgetCategory = "Core" | "Navigation" | "IMU" | "Attitude" | "Viz" | "Flight" | "Safety" | "Sensors";
 
 export type WidgetDef = {
   id: WidgetId;
@@ -124,6 +125,16 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 5, h: 7 },
     defaultView: "card",
     defaultTheme: { accent: "#ffb02e" },
+  },
+  {
+    id: "env.card",
+    name: "Environment",
+    category: "Sensors",
+    requires: ["environment"],
+    hardwareHint: "Onboard baro/temp sensor (BMP280/BME280/MS5611). Shows temperature, pressure, and humidity.",
+    defaultSize: { w: 5, h: 7 },
+    defaultView: "card",
+    defaultTheme: { accent: "#57c1ff" },
   },
 ];
 

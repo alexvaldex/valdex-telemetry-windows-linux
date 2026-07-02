@@ -597,6 +597,37 @@ export function renderWidget(args: {
     );
   }
 
+  if (widgetId === "env.card") {
+    const tc = latest?.temp_c;
+    const pa = latest?.pressure_pa;
+    const rh = latest?.humidity_pct;
+
+    const tVal = typeof tc === "number" ? (unitSystem === "imperial" ? (tc * 9) / 5 + 32 : tc) : undefined;
+    const tUnit = unitSystem === "imperial" ? "°F" : "°C";
+    const hpa = typeof pa === "number" ? pa / 100 : undefined;
+    const psi = typeof pa === "number" ? pa * 0.00014503773773 : undefined;
+
+    if (view === "plot") {
+      return (
+        <div style={{ display: "grid", gap: 10 }}>
+          <PlotLine frames={frames} yKey="temp_c" yLabel={`Temperature (${tUnit})`} transformY={(c) => (unitSystem === "imperial" ? (c * 9) / 5 + 32 : c)} />
+          <PlotLine frames={frames} yKey="pressure_pa" yLabel="Pressure (hPa)" transformY={(p) => p / 100} color="var(--vx-go)" />
+        </div>
+      );
+    }
+
+    return (
+      <div style={{ display: "grid", gap: 12, height: "100%", alignContent: "start" }}>
+        <BigReadout value={tVal !== undefined ? tVal.toFixed(1) : "—"} unit={tUnit} accent="var(--vx-blue-bright)" />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+          <StatTile label="PRESS hPa" value={hpa !== undefined ? hpa.toFixed(1) : "—"} />
+          <StatTile label="PRESS psi" value={psi !== undefined ? psi.toFixed(2) : "—"} />
+          <StatTile label="HUMIDITY" value={typeof rh === "number" ? `${rh.toFixed(0)}%` : "—"} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ fontSize: 12, opacity: 0.75 }}>
       No renderer for <code>{widgetId}</code>

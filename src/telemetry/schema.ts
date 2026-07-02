@@ -84,6 +84,21 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
   const q_y = num(pick(raw, ["q_y", "qy", "quat_y", "y"]));
   const q_z = num(pick(raw, ["q_z", "qz", "quat_z", "z"]));
 
+  // Environment: temperature (°C), pressure (Pa), humidity (%)
+  const temp_c =
+    num(pick(raw, ["temp_c", "temp", "temperature", "temperature_c", "tempC"])) ??
+    (num(pick(raw, ["temp_f", "temperature_f", "tempF"])) !== undefined
+      ? ((num(pick(raw, ["temp_f", "temperature_f", "tempF"]))! - 32) * 5) / 9
+      : undefined);
+
+  const pressure_pa =
+    num(pick(raw, ["pressure_pa", "press_pa", "baro_pa", "pressure"])) ??
+    (num(pick(raw, ["pressure_hpa", "press_hpa", "hpa", "mbar", "pressure_mbar"])) !== undefined
+      ? num(pick(raw, ["pressure_hpa", "press_hpa", "hpa", "mbar", "pressure_mbar"]))! * 100
+      : undefined);
+
+  const humidity_pct = num(pick(raw, ["humidity_pct", "humidity", "rh", "hum"]));
+
   // Events / continuity
   const event = typeof raw.event === "string" ? raw.event : (typeof raw.ev === "string" ? raw.ev : undefined);
   const pyro_main_cont = raw.pyro_main_cont === 0 || raw.pyro_main_cont === 1 ? raw.pyro_main_cont : undefined;
@@ -102,6 +117,9 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
     gps_fix,
     gps_sats,
     q_w, q_x, q_y, q_z,
+    temp_c,
+    pressure_pa,
+    humidity_pct,
     event,
     pyro_main_cont,
     pyro_drogue_cont,

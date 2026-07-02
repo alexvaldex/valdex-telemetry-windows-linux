@@ -24,6 +24,11 @@ export type TelemetryFrameV1 = {
   // Orientation (Tier 2)
   q_w?: number; q_x?: number; q_y?: number; q_z?: number;
 
+  // Environment (Tier 2) — onboard baro/temp/humidity sensors
+  temp_c?: number;
+  pressure_pa?: number;
+  humidity_pct?: number;
+
   // Events / pyro / states (Tier 3)
   event?: string;
   pyro_main_cont?: 0 | 1;

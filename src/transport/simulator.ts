@@ -15,6 +15,7 @@ const SIM_SPEED = 6; // sim-seconds per real-second, so a full flight plays out 
 // Launch pad location (near a typical HPR range) + wind drift for recovery realism
 const PAD_LAT = 32.9903;   // ~ FAR / Mojave-ish
 const PAD_LON = -106.9749;
+const PAD_ALT_M = 1400;    // pad elevation above sea level (affects baro/temp)
 const M_PER_DEG_LAT = 111_320;
 const WIND_E_MPS = 4.5;    // eastward wind pushes vehicle downrange under chute
 const WIND_N_MPS = 1.5;
@@ -207,6 +208,13 @@ export class SimulatorConnection implements Connection {
     const jitter = () => (Math.random() - 0.5) * 0.08;
     const gpsJitter = () => (Math.random() - 0.5) * 0.00002;
 
+    // Environment from the International Standard Atmosphere (troposphere model),
+    // referenced to the pad altitude so it reads realistically through the flight.
+    const altAbs = PAD_ALT_M + Math.max(0, alt);
+    const temp_c = 15.0 - 0.0065 * altAbs + (Math.random() - 0.5) * 0.3;
+    const pressure_pa = 101325 * Math.pow(1 - 2.25577e-5 * altAbs, 5.25588);
+    const humidity_pct = Math.max(8, Math.min(95, 55 - alt / 60 + (Math.random() - 0.5) * 2));
+
     const frame: Record<string, unknown> = {
       v: 1,
       t_ms: Math.round(this.simMs),
@@ -221,6 +229,9 @@ export class SimulatorConnection implements Connection {
       lon: Math.round((lon + gpsJitter()) * 1e6) / 1e6,
       gps_fix: 3,
       gps_sats: 9 + Math.round((Math.random() - 0.5) * 2),
+      temp_c: Math.round(temp_c * 10) / 10,
+      pressure_pa: Math.round(pressure_pa),
+      humidity_pct: Math.round(humidity_pct),
       pyro_drogue_cont: this.drogueCont,
       pyro_main_cont: this.mainCont,
     };
