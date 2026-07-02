@@ -63,6 +63,10 @@ export class SimulatorConnection implements Connection {
   private drogueEventSent = false;
   private spinDeg = 0; // accumulated roll about the long axis
 
+  // Per-stream packet sequence counters (~1.5% simulated drop rate).
+  private seqSust = 0;
+  private seqBstr = 0;
+
   // Separated booster — its own tracker stream (vid "BSTR") after staging.
   private booster: {
     phase: "coast" | "descent" | "landed";
@@ -105,6 +109,8 @@ export class SimulatorConnection implements Connection {
     this.drogueEventSent = false;
     this.spinDeg = 0;
     this.booster = null;
+    this.seqSust = 0;
+    this.seqBstr = 0;
 
     this.setStatus("connected");
 
@@ -117,11 +123,42 @@ export class SimulatorConnection implements Connection {
     this.setStatus("disconnected");
   }
 
-  /** TX console support — the sim acknowledges commands like real firmware would. */
+  /** TX console support — the sim acknowledges commands like real firmware
+      would, including a SiK/RFD900-style AT command set so the Radio panel
+      is fully demoable. */
+  private atMode = false;
+  private radioParams: Record<number, number> = { 1: 57, 2: 64, 3: 25, 4: 20, 6: 1 }; // S-registers: serial, air speed, netid, power, mavlink
+
   async write(line: string): Promise<void> {
     const cmd = line.trim().toUpperCase();
     setTimeout(() => {
       if (this.status !== "connected") return;
+
+      // SiK / RFD900 AT command emulation
+      if (cmd === "+++") { this.atMode = true; this.emitRaw("OK"); return; }
+      if (this.atMode && cmd.startsWith("AT")) {
+        if (cmd === "ATI") this.emitRaw("RFD SiK 2.65 on VX-SIM900");
+        else if (cmd === "ATI5") {
+          this.emitRaw("S1:SERIAL_SPEED=57");
+          this.emitRaw(`S2:AIR_SPEED=${this.radioParams[2]}`);
+          this.emitRaw(`S3:NETID=${this.radioParams[3]}`);
+          this.emitRaw(`S4:TXPOWER=${this.radioParams[4]}`);
+          this.emitRaw(`S6:MAVLINK=${this.radioParams[6]}`);
+        } else if (cmd === "ATI7") this.emitRaw(`L/R RSSI: 208/195  L/R noise: 55/62  pkts: ${Math.round(this.simMs / 50)}`);
+        else if (/^ATS(\d+)=(\d+)$/.test(cmd)) {
+          const [, reg, val] = cmd.match(/^ATS(\d+)=(\d+)$/)!;
+          this.radioParams[Number(reg)] = Number(val);
+          this.emitRaw("OK");
+        } else if (/^ATS(\d+)\?$/.test(cmd)) {
+          const [, reg] = cmd.match(/^ATS(\d+)\?$/)!;
+          this.emitRaw(String(this.radioParams[Number(reg)] ?? 0));
+        } else if (cmd === "AT&W") this.emitRaw("OK");
+        else if (cmd === "ATZ") { this.atMode = false; this.emitRaw("OK"); }
+        else if (cmd === "ATO") { this.atMode = false; this.emitRaw("OK"); }
+        else this.emitRaw("ERROR");
+        return;
+      }
+
       if (cmd === "PING") this.emitRaw("# PONG");
       else if (cmd === "STATUS") this.emitRaw(`# STATUS phase=${this.phase} batt=${this.battV.toFixed(2)}V alt=${this.lastAlt.toFixed(1)}m`);
       else if (cmd === "VERSION") this.emitRaw("# VX-SIM firmware 1.0.0");
@@ -308,9 +345,11 @@ export class SimulatorConnection implements Connection {
     const q = qMul(qAxis(Math.cos(axR), 0, Math.sin(axR), tiltDeg), qAxis(0, 1, 0, this.spinDeg % 360));
     const r4 = (n: number) => Math.round(n * 10000) / 10000;
 
+    this.seqSust += Math.random() < 0.015 ? 2 : 1; // occasional dropped packet
     const frame: Record<string, unknown> = {
       v: 1,
       vid: "SUST",
+      seq: this.seqSust,
       t_ms: Math.round(this.simMs),
       alt_m: Math.round(Math.max(0, alt) * 100) / 100,
       vel_mps: Math.round(vel * 100) / 100,
@@ -381,9 +420,11 @@ export class SimulatorConnection implements Connection {
     const lat = PAD_LAT + b.posN / M_PER_DEG_LAT;
     const lon = PAD_LON + b.posE / (M_PER_DEG_LAT * Math.cos((PAD_LAT * Math.PI) / 180));
 
+    this.seqBstr += Math.random() < 0.03 ? 2 : 1; // weaker link drops more
     const frame: Record<string, unknown> = {
       v: 1,
       vid: "BSTR",
+      seq: this.seqBstr,
       t_ms: Math.round(this.simMs),
       alt_m: Math.round(Math.max(0, b.alt) * 100) / 100,
       vel_mps: Math.round(b.vel * 100) / 100,

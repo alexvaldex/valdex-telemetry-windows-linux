@@ -39,6 +39,7 @@ type WidgetSettings = {
   units?: UnitSystem; // per-widget override (otherwise inherit global)
   accent?: string; // per-widget accent override
   view?: "card" | "instrument" | "plot";
+  vid?: string; // per-widget vehicle override: undefined = follow global, "ALL" = every stream
 };
 
 type MenuState = { open: false } | { open: true; x: number; y: number; widgetKey?: string };
@@ -219,6 +220,7 @@ function toCSV(frames: TelemetryFrameV1[]) {
   const keys: (keyof TelemetryFrameV1)[] = [
     "t_ms",
     "vid",
+    "seq",
     "alt_m",
     "vel_mps",
     "batt_v",
@@ -524,6 +526,9 @@ export default function App() {
 
   /** Field remapping modal */
   const [fieldMapOpen, setFieldMapOpen] = useState(false);
+
+  /** Radio config panel */
+  const [radioOpen, setRadioOpen] = useState(false);
 
   /** Custom alert rules */
   const [alertRulesOpen, setAlertRulesOpen] = useState(false);
@@ -2460,6 +2465,7 @@ ${trkpts}
           <button className="vx-btn" onClick={exportGPX} title="Export GPS track as GPX — works with most GPS/mapping apps">Export GPX</button>
           <button className="vx-btn" onClick={openFlightReport} title="Print-ready mission report (use Print → Save as PDF)">Report</button>
           <button className="vx-btn" onClick={() => setAlertRulesOpen(true)} title="Custom alert thresholds on any telemetry field">Alert Rules{alertRules.length ? ` (${alertRules.length})` : ""}</button>
+          <button className="vx-btn" onClick={() => setRadioOpen(true)} title="Configure a SiK/RFD900-family telemetry radio over the serial link">Radio</button>
           <button className="vx-btn" onClick={() => setFieldMapOpen(true)} title="Map custom firmware field names onto the VX telemetry contract">Field Map</button>
 
           <label className="vx-btn" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -2554,6 +2560,8 @@ ${trkpts}
                 locked={!isLayoutEditable} // locked in flight + playback
                 pinned={!!(layout.find((l) => l.i === inst.key) as any)?.static}
                 connected={connStatus === "connected"}
+                allFrames={sourceFrames}
+                seenVids={seenVids}
                 theme={theme}
                 onPatchSettings={(patch) => saveWidgetSettings(inst.key, patch)}
                 onResetAccent={() => resetWidgetAccent(inst.key)}
@@ -2642,6 +2650,11 @@ ${trkpts}
       {/* Alert Rules Modal */}
       {alertRulesOpen && (
         <AlertRulesModal rules={alertRules} onChange={updateAlertRules} onClose={() => setAlertRulesOpen(false)} />
+      )}
+
+      {/* Radio Config Modal */}
+      {radioOpen && (
+        <RadioModal connected={connStatus === "connected"} onSend={sendCommand} onClose={() => setRadioOpen(false)} />
       )}
 
       {/* Command Palette */}
@@ -2820,6 +2833,101 @@ function ContextMenu(props: {
         <div>
           <div style={{ fontWeight: 900 }}>Close</div>
           <div className="vx-menu-muted">Esc</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** ---------- RadioModal — SiK/RFD900-family radio configuration ---------- */
+function RadioModal(props: { connected: boolean; onSend: (cmd: string) => void; onClose: () => void }) {
+  const [netId, setNetId] = useState("25");
+  const [airSpeed, setAirSpeed] = useState("64");
+  const [txPower, setTxPower] = useState("20");
+  const [custom, setCustom] = useState("");
+  const { connected, onSend } = props;
+
+  function Btn({ cmd, label, title }: { cmd: string; label: string; title?: string }) {
+    return (
+      <button className="vx-btn" disabled={!connected} onClick={() => onSend(cmd)} title={title ?? `Send ${cmd}`}>
+        {label}
+      </button>
+    );
+  }
+
+  function ParamRow({ label, reg, value, setValue, hint }: { label: string; reg: number; value: string; setValue: (v: string) => void; hint: string }) {
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "110px 1fr auto auto", gap: 8, alignItems: "center" }}>
+        <span className="vx-label" title={hint}>{label}</span>
+        <input className="vx-input" value={value} onChange={(e) => setValue(e.target.value.replace(/[^0-9]/g, ""))} />
+        <button className="vx-btn" disabled={!connected || !value} onClick={() => onSend(`ATS${reg}=${value}`)} title={`ATS${reg}=${value}`}>Set</button>
+        <button className="vx-btn" disabled={!connected} onClick={() => onSend(`ATS${reg}?`)} title={`Read current value (ATS${reg}?)`}>Read</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="vx-modal-backdrop" onMouseDown={props.onClose}>
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        style={{
+          width: "min(640px, 94vw)", maxHeight: "86vh", overflow: "auto",
+          background: "rgba(7,11,22,0.98)", border: "1px solid var(--vx-line-strong)",
+          borderRadius: 4, boxShadow: "0 22px 70px rgba(0,0,0,0.75)", padding: 20,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>📡 Radio Config</div>
+          <button className="vx-xbtn" onClick={props.onClose}>×</button>
+        </div>
+
+        <div style={{ fontSize: 12, color: "var(--vx-fg-dim)", lineHeight: 1.6, marginBottom: 12 }}>
+          For SiK / RFD900-family telemetry radios (RFD900x, HM-TRP, mRo SiK). Commands go out the serial TX line;
+          <b style={{ color: "var(--vx-fg)" }}> responses appear in the Raw Console</b>. Enter command mode first —
+          both radios of a pair must share NETID and air speed.
+          {!connected && <div style={{ color: "var(--vx-caution)", marginTop: 6 }}>Not connected — connect a transport to send commands.</div>}
+        </div>
+
+        <div className="vx-card">
+          <div className="vx-label" style={{ marginBottom: 8 }}>Command mode</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn cmd="+++" label="+++ Enter" title="Enter AT command mode (radio expects 1 s of silence around it)" />
+            <Btn cmd="ATO" label="Exit" title="Leave command mode (ATO)" />
+            <Btn cmd="AT&W" label="Save" title="Write parameters to EEPROM (AT&W)" />
+            <Btn cmd="ATZ" label="Reboot" title="Reboot radio (ATZ) — applies saved parameters" />
+          </div>
+        </div>
+
+        <div className="vx-card" style={{ marginTop: 10 }}>
+          <div className="vx-label" style={{ marginBottom: 8 }}>Query</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn cmd="ATI" label="Version" />
+            <Btn cmd="ATI5" label="All Parameters" />
+            <Btn cmd="ATI7" label="Link Report" title="RSSI / noise / packet stats (ATI7)" />
+          </div>
+        </div>
+
+        <div className="vx-card" style={{ marginTop: 10, display: "grid", gap: 10 }}>
+          <div className="vx-label">Set parameters</div>
+          <ParamRow label="NETID (S3)" reg={3} value={netId} setValue={setNetId} hint="Network ID — both radios must match (0–499)" />
+          <ParamRow label="AIR SPEED (S2)" reg={2} value={airSpeed} setValue={setAirSpeed} hint="Air data rate kbps (4–250). Lower = more range" />
+          <ParamRow label="TX POWER (S4)" reg={4} value={txPower} setValue={setTxPower} hint="Transmit power dBm (0–30, check local regs)" />
+          <div style={{ fontSize: 11, color: "var(--vx-fg-faint)" }}>Set → Save → Reboot to apply. Change the remote radio first or you'll lose the link.</div>
+        </div>
+
+        <div className="vx-card" style={{ marginTop: 10 }}>
+          <div className="vx-label" style={{ marginBottom: 8 }}>Custom command</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              className="vx-input"
+              style={{ flex: 1, fontFamily: "var(--vx-font-mono)" }}
+              placeholder="e.g. ATS8?"
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && custom.trim() && connected) { onSend(custom.trim()); setCustom(""); } }}
+            />
+            <button className="vx-btn" disabled={!connected || !custom.trim()} onClick={() => { onSend(custom.trim()); setCustom(""); }}>Send</button>
+          </div>
         </div>
       </div>
     </div>
@@ -3635,6 +3743,8 @@ function WidgetFrame(props: {
   locked: boolean;
   pinned: boolean;
   connected: boolean;
+  allFrames: TelemetryFrameV1[]; // unfiltered source, for per-widget vehicle overrides
+  seenVids: string[];
   theme: ThemeSettings;
   onPatchSettings: (patch: WidgetSettings) => void;
   onResetAccent: () => void;
@@ -3675,7 +3785,30 @@ function WidgetFrame(props: {
     if (rawPinnedTopRef.current) el.scrollTop = 0;
   }, [props.telemetry?.rawLines, props.widgetId]);
 
-  const body = renderWidget({ widgetId: props.widgetId, latest: props.latest, telemetry: props.telemetry, unitSystem, view });
+  // Per-widget vehicle override: undefined follows the global selection
+  // (props.telemetry is already globally filtered); "ALL" shows every stream;
+  // a specific vid re-filters from the unfiltered source.
+  const widgetVid = props.settings?.vid;
+  const effTelemetry = useMemo(() => {
+    if (!widgetVid) return { telemetry: props.telemetry, latest: props.latest };
+    const frames =
+      widgetVid === "ALL"
+        ? props.allFrames
+        : props.allFrames.filter((f) => f.vid === undefined || String(f.vid) === widgetVid);
+    return {
+      telemetry: { ...props.telemetry, frames },
+      latest: frames.length ? frames[frames.length - 1] : undefined,
+    };
+  }, [widgetVid, props.telemetry, props.latest, props.allFrames]);
+
+  function cycleWidgetVid() {
+    const order: Array<string | undefined> = [undefined, "ALL", ...props.seenVids];
+    const idx = order.findIndex((v) => v === widgetVid);
+    const next = order[(idx + 1) % order.length];
+    props.onPatchSettings({ vid: next as string | undefined });
+  }
+
+  const body = renderWidget({ widgetId: props.widgetId, latest: effTelemetry.latest, telemetry: effTelemetry.telemetry, unitSystem, view });
 
   const consoleFg = autoTextColor(props.theme.consoleBg);
 
@@ -3731,6 +3864,18 @@ function WidgetFrame(props: {
             >
               {unitsMode === "inherit" ? "U:G" : unitsMode === "metric" ? "SI" : "US"}
             </button>
+
+            {/* Vehicle: G (global selection) -> ALL -> each stream */}
+            {props.seenVids.length >= 2 && (
+              <button
+                className="vx-tbtn"
+                onClick={cycleWidgetVid}
+                title={`Vehicle: ${widgetVid ?? "follow global selection"} — click to cycle`}
+                style={widgetVid ? { color: "var(--vx-blue-bright)", borderColor: "var(--vx-blue)" } : undefined}
+              >
+                {widgetVid ? `▲${widgetVid === "ALL" ? "ALL" : widgetVid}` : "▲G"}
+              </button>
+            )}
 
             {/* Accent dot — pick color; right-click resets to default */}
             <label

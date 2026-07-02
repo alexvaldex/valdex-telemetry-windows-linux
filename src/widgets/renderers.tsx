@@ -1003,6 +1003,20 @@ export function renderWidget(args: {
       }
     }
 
+    // True packet loss from sequence numbers when the firmware sends them.
+    let lossPct: number | undefined;
+    const seqs: number[] = [];
+    for (let i = Math.max(0, frames.length - 300); i < frames.length; i++) {
+      const s = frames[i]?.seq;
+      if (typeof s === "number") seqs.push(s);
+    }
+    if (seqs.length > 10) {
+      const expected = seqs[seqs.length - 1] - seqs[0] + 1;
+      if (expected > 0 && expected >= seqs.length) {
+        lossPct = Math.round(((expected - seqs.length) / expected) * 1000) / 10;
+      }
+    }
+
     if (view === "plot") {
       const hasSnr = frames.some((f) => typeof f.snr_db === "number");
       return (
@@ -1020,7 +1034,16 @@ export function renderWidget(args: {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
           <StatTile label="SNR" value={typeof snr === "number" ? snr.toFixed(1) : "—"} unit="dB" />
           <StatTile label="RATE" value={rateHz !== undefined ? rateHz.toFixed(1) : "—"} unit="Hz" />
-          <StatTile label="GAPS" value={gapPct !== undefined ? String(gapPct) : "—"} unit="%" />
+          {lossPct !== undefined ? (
+            <StatTile
+              label="LOSS"
+              value={lossPct.toFixed(1)}
+              unit="%"
+              accent={lossPct > 10 ? "var(--vx-crit)" : lossPct > 3 ? "var(--vx-caution)" : "var(--vx-go)"}
+            />
+          ) : (
+            <StatTile label="GAPS" value={gapPct !== undefined ? String(gapPct) : "—"} unit="%" />
+          )}
         </div>
       </div>
     );

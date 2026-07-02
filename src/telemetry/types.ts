@@ -6,6 +6,9 @@ export type TelemetryFrameV1 = {
   // (booster + sustainer trackers, multiple rockets on one frequency).
   vid?: string | number;
 
+  // Packet sequence number (per stream) — enables true packet-loss stats.
+  seq?: number;
+
   // Common / Tier 1
   alt_m?: number;
   vel_mps?: number;

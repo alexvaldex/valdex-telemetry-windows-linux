@@ -91,6 +91,9 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
   const q_y = num(pick(raw, ["q_y", "qy", "quat_y", "y"]));
   const q_z = num(pick(raw, ["q_z", "qz", "quat_z", "z"]));
 
+  // Packet sequence number
+  const seq = int(pick(raw, ["seq", "seq_no", "pkt_seq", "packet_num"]));
+
   // Vehicle / stream id
   const vidRaw = pick<unknown>(raw, ["vid", "node", "addr", "src_id"]);
   const vid = typeof vidRaw === "string" || typeof vidRaw === "number" ? vidRaw : undefined;
@@ -119,6 +122,7 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
     v: 1,
     t_ms: t_ms!,
     vid,
+    seq,
     alt_m,
     vel_mps,
     batt_v,

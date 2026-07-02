@@ -8,11 +8,18 @@
     "build": "vite build",
     "preview": "vite preview"
   },
-  "keywords": ["rocketry", "telemetry", "ground-station", "hpr", "avionics"],
+  "keywords": [
+    "rocketry",
+    "telemetry",
+    "ground-station",
+    "hpr",
+    "avionics"
+  ],
   "author": "Valdex",
   "license": "ISC",
   "type": "module",
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.2",
