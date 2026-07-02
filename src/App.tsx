@@ -31,6 +31,7 @@ import type { Model3D, UpAxis } from "./widgets/rocketModel";
 import { getFieldMap, saveFieldMap, getUnknownKeys, V1_TARGET_KEYS, type FieldMapping } from "./telemetry/fieldMap";
 import { speak } from "./audio/voice";
 import { loadAlertRules, saveAlertRules, ruleFires, RULE_FIELDS, type AlertRule } from "./telemetry/alertRules";
+import { setGhost } from "./telemetry/ghost";
 import { computeFlightSummary } from "./widgets/flightSummary";
 
 /** ---------- Types ---------- */
@@ -542,6 +543,17 @@ export default function App() {
   /** Radio config panel */
   const [radioOpen, setRadioOpen] = useState(false);
 
+
+  /** Flight comparison overlay: a reference flight drawn as a dim dashed
+      trace on every plot, liftoff-aligned to the current flight. */
+  const [ghostFlight, setGhostFlight] = useState<{ name: string; frames: TelemetryFrameV1[] } | null>(null);
+  function extractLiftoffTms(frames: TelemetryFrameV1[]): number | null {
+    for (const f of frames) {
+      if (typeof f.event === "string" && f.event.toUpperCase().includes("LIFT")) return f.t_ms;
+    }
+    return null;
+  }
+
   /** Custom alert rules */
   const [alertRulesOpen, setAlertRulesOpen] = useState(false);
   const [alertRules, setAlertRules] = useState<AlertRule[]>(() => loadAlertRules());
@@ -586,12 +598,76 @@ export default function App() {
   const [voiceOn, setVoiceOn] = useState<boolean>(() => {
     try { return localStorage.getItem("vx.voice") !== "0"; } catch { return true; }
   });
+
+  /** Field mode: maximum-contrast display for direct sunlight. */
+  const [fieldMode, setFieldMode] = useState<boolean>(() => {
+    try { return localStorage.getItem("vx.fieldContrast") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    document.documentElement.classList.toggle("vx-field", fieldMode);
+  }, [fieldMode]);
+  function toggleFieldMode() {
+    setFieldMode((v) => {
+      const next = !v;
+      localStorage.setItem("vx.fieldContrast", next ? "1" : "0");
+      return next;
+    });
+  }
   function toggleVoice() {
     setVoiceOn((v) => {
       const next = !v;
       localStorage.setItem("vx.voice", next ? "1" : "0");
       return next;
     });
+  }
+
+  /** Countdown clock (T− with holds). Hands off to T+ at the LIFTOFF event. */
+  type Countdown = { mode: "idle" } | { mode: "running"; t0Epoch: number } | { mode: "hold"; remainingMs: number };
+  const [countdown, setCountdown] = useState<Countdown>({ mode: "idle" });
+  const [, setClockTick] = useState(0); // re-render while the countdown runs
+  const lastCalloutSecRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (countdown.mode !== "running") return;
+    const t = window.setInterval(() => {
+      setClockTick((x) => x + 1);
+      // Range-style voice callouts on the way down.
+      const remS = Math.ceil((countdown.t0Epoch - Date.now()) / 1000);
+      if (voiceOn && remS !== lastCalloutSecRef.current) {
+        lastCalloutSecRef.current = remS;
+        if (remS === 60 || remS === 30) speak(`T minus ${remS} seconds`);
+        else if (remS === 10) speak("T minus 10");
+        else if (remS >= 1 && remS <= 5) speak(String(remS));
+        else if (remS === 0) speak("T zero");
+      }
+    }, 250);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [countdown, voiceOn]);
+
+  function countdownRemainingMs(): number | null {
+    if (countdown.mode === "running") return countdown.t0Epoch - Date.now();
+    if (countdown.mode === "hold") return countdown.remainingMs;
+    return null;
+  }
+  function startCountdown() {
+    const raw = window.prompt("Countdown duration (minutes, e.g. 5 or 2.5):", "5");
+    if (!raw) return;
+    const mins = Number(raw);
+    if (!Number.isFinite(mins) || mins <= 0) return;
+    lastCalloutSecRef.current = null;
+    setCountdown({ mode: "running", t0Epoch: Date.now() + mins * 60_000 });
+  }
+  function holdOrResumeCountdown() {
+    if (countdown.mode === "running") {
+      setCountdown({ mode: "hold", remainingMs: Math.max(0, countdown.t0Epoch - Date.now()) });
+      if (voiceOn) speak("Hold hold hold");
+    } else if (countdown.mode === "hold") {
+      setCountdown({ mode: "running", t0Epoch: Date.now() + countdown.remainingMs });
+      if (voiceOn) speak("Count resumed");
+    }
+  }
+  function clearCountdown() {
+    setCountdown({ mode: "idle" });
   }
 
   /** Grid width — measured from the shell so the layout spans the full viewport */
@@ -1081,6 +1157,25 @@ export default function App() {
     }
   }
 
+  async function overlayFlightFromLog(id: string) {
+    const rec = await getFlight(id);
+    if (!rec) return;
+    const frames: TelemetryFrameV1[] = [];
+    for (const line of rec.rawLines) {
+      try {
+        const obj = JSON.parse(line.replace(/\*[0-9A-Fa-f]{4}$/, ""));
+        if (obj && obj.v === 1 && typeof obj.t_ms === "number") frames.push(obj as TelemetryFrameV1);
+      } catch { /* skip */ }
+    }
+    if (!frames.length) {
+      window.alert("That flight has no parseable frames to overlay.");
+      return;
+    }
+    frames.sort((a, b) => a.t_ms - b.t_ms);
+    setGhostFlight({ name: rec.name, frames });
+    setFlightLogOpen(false);
+  }
+
   async function loadFlightFromLog(id: string) {
     try {
       const rec = await getFlight(id);
@@ -1520,18 +1615,28 @@ ${trkpts}
   }, [derivedEvents, display.idx]);
 
   // Mission clock: T+ MET measured from LIFTOFF; T- countdown to it if not yet lifted off.
-  const missionClock = useMemo(() => {
-    const liftoff = derivedEvents.find((e) => e.id === "LIFTOFF");
-    if (!liftoff) return { label: "T− --:--:--", counting: false };
-    const met = display.t_ms - liftoff.t_ms;
-    const sign = met >= 0 ? "+" : "−";
-    const s = Math.abs(met) / 1000;
-    const hh = Math.floor(s / 3600);
-    const mm = Math.floor((s % 3600) / 60);
-    const ss = Math.floor(s % 60);
+  const fmtClock = (ms: number) => {
+    const sign = ms >= 0 ? "+" : "−";
+    const s = Math.abs(ms) / 1000;
     const pad = (n: number) => String(n).padStart(2, "0");
-    return { label: `T${sign} ${pad(hh)}:${pad(mm)}:${pad(ss)}`, counting: met >= 0 };
-  }, [derivedEvents, display.t_ms]);
+    return `T${sign} ${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(Math.floor(s % 60))}`;
+  };
+
+  // Mission clock: real T+ (from the LIFTOFF event) wins; otherwise the
+  // operator countdown; otherwise idle. Not memoized — the countdown ticker
+  // re-renders us 4×/s while running and the math is trivial.
+  const missionClock = (() => {
+    const liftoff = derivedEvents.find((e) => e.id === "LIFTOFF");
+    if (liftoff) {
+      const met = display.t_ms - liftoff.t_ms;
+      return { label: fmtClock(met), counting: met >= 0, holding: false };
+    }
+    const rem = countdownRemainingMs();
+    if (rem !== null) {
+      return { label: fmtClock(-rem), counting: false, holding: countdown.mode === "hold" };
+    }
+    return { label: "T− --:--:--", counting: false, holding: false };
+  })();
 
   // Flight peaks over the displayed frame history.
   const peaks = useMemo(() => {
@@ -1590,7 +1695,21 @@ ${trkpts}
     return alt / -vel;
   }, [flightPhase, display.latest]);
 
-  // GO / NO-GO readiness board.
+  // Keep the ghost overlay aligned: shift its clock so its liftoff (or first
+  // frame) lands on the current flight's liftoff (or first frame).
+  useEffect(() => {
+    if (!ghostFlight) {
+      setGhost(null);
+      return;
+    }
+    const liveLift = derivedEvents.find((e) => e.id === "LIFTOFF")?.t_ms ?? display.frames[0]?.t_ms ?? 0;
+    const ghostLift = extractLiftoffTms(ghostFlight.frames) ?? ghostFlight.frames[0]?.t_ms ?? 0;
+    const offset = liveLift - ghostLift;
+    setGhost({ name: ghostFlight.name, frames: ghostFlight.frames.map((f) => ({ ...f, t_ms: f.t_ms + offset })) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ghostFlight, derivedEvents, display.frames.length === 0]);
+
+    // GO / NO-GO readiness board.
   type GoState = "go" | "caution" | "crit" | "nodata";
   const readiness = useMemo(() => {
     const live = playback.mode !== "playback";
@@ -2262,7 +2381,31 @@ ${trkpts}
 
           {/* Mission clock + phase */}
           <div className="vx-hdr-panel vx-clock">
-            <div className={`vx-clock-time ${missionClock.counting ? "counting" : ""}`}>{missionClock.label}</div>
+            <div
+              className={`vx-clock-time ${missionClock.counting ? "counting" : ""}`}
+              style={missionClock.holding ? { color: "var(--vx-caution)", textShadow: "0 0 20px var(--vx-caution-glow)" } : undefined}
+            >
+              {missionClock.holding ? "HOLD " : ""}{missionClock.label}
+            </div>
+            {/* Countdown controls — only before real liftoff */}
+            {!derivedEvents.some((e) => e.id === "LIFTOFF") && (
+              <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+                {countdown.mode === "idle" ? (
+                  <button className="vx-tbtn" onClick={startCountdown} title="Start a T-minus countdown">SET COUNT</button>
+                ) : (
+                  <>
+                    <button
+                      className="vx-tbtn"
+                      onClick={holdOrResumeCountdown}
+                      style={countdown.mode === "hold" ? { color: "var(--vx-go)", borderColor: "var(--vx-go)" } : { color: "var(--vx-caution)", borderColor: "var(--vx-caution)" }}
+                    >
+                      {countdown.mode === "hold" ? "RESUME" : "HOLD"}
+                    </button>
+                    <button className="vx-tbtn vx-tbtn-danger" onClick={clearCountdown} title="Clear countdown">×</button>
+                  </>
+                )}
+              </div>
+            )}
             <div className="vx-phase-track">
               {PHASE_SEQUENCE.map((p) => {
                 const active = p === flightPhase;
@@ -2344,6 +2487,13 @@ ${trkpts}
               title="Voice callouts — spoken flight events (liftoff, apogee, main…)"
             >
               {voiceOn ? "🔈 Voice" : "🔇 Voice"}
+            </button>
+            <button
+              className={`vx-btn ${fieldMode ? "vx-btn-primary" : ""}`}
+              onClick={toggleFieldMode}
+              title="Field mode — maximum contrast for direct sunlight"
+            >
+              ☀ Field
             </button>
             <button className="vx-btn" onClick={() => setSettingsOpen(true)} title="Settings">Settings</button>
             <button className="vx-btn" onClick={() => setPaletteOpen(true)} title="Command Palette (Ctrl+K)">⌘K</button>
@@ -2540,6 +2690,18 @@ ${trkpts}
           </button>
           <button className="vx-btn" onClick={exportSessionJSONL} title={`Export raw telemetry (Ctrl+E) (${logCount})`}>Export JSONL</button>
           <button className="vx-btn" onClick={exportFramesCSV} title="Export frames as CSV (Ctrl+Shift+E)">Export CSV</button>
+          {ghostFlight && (
+            <span className="vx-chip" style={{ borderColor: "var(--vx-blue)", color: "var(--vx-blue-bright)" }} title="Comparison overlay active on all plots">
+              GHOST: {ghostFlight.name.slice(0, 24)}
+              <button
+                onClick={() => setGhostFlight(null)}
+                style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", marginLeft: 4 }}
+                title="Remove overlay"
+              >
+                ×
+              </button>
+            </span>
+          )}
           <button className="vx-btn" onClick={exportKML} title="Export GPS track as KML — open with Google Earth Pro or import at earth.google.com">Export KML</button>
           <button className="vx-btn" onClick={exportGPX} title="Export GPS track as GPX — works with most GPS/mapping apps">Export GPX</button>
           <button className="vx-btn" onClick={openFlightReport} title="Print-ready mission report (use Print → Save as PDF)">Report</button>
@@ -2770,6 +2932,7 @@ ${trkpts}
           flights={flights}
           onClose={() => setFlightLogOpen(false)}
           onLoad={loadFlightFromLog}
+          onOverlay={overlayFlightFromLog}
           onDelete={deleteFlightFromLog}
         />
       )}
@@ -2782,6 +2945,7 @@ function FlightLogModal(props: {
   flights: FlightMeta[];
   onClose: () => void;
   onLoad: (id: string) => void;
+  onOverlay: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
   function fmtDur(ms?: number) {
@@ -2831,6 +2995,7 @@ function FlightLogModal(props: {
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
                       <button className="vx-btn vx-btn-primary" onClick={() => props.onLoad(f.id)}>Load</button>
+                      <button className="vx-btn" onClick={() => props.onOverlay(f.id)} title="Draw this flight as a dashed reference trace on every plot, liftoff-aligned">Overlay</button>
                       <button
                         className="vx-btn vx-btn-danger"
                         onClick={() => { if (window.confirm(`Delete flight "${f.name}"? This cannot be undone.`)) props.onDelete(f.id); }}

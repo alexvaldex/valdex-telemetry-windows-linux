@@ -3,6 +3,8 @@ import React, { useMemo } from "react";
 import type { WidgetId } from "./registry";
 import type { TelemetryFrameV1 } from "../telemetry/types";
 import type { UnitSystem } from "../units";
+import { getCrcStats } from "../telemetry/ingest";
+import { getGhost, getGhostVersion } from "../telemetry/ghost";
 
 import { lazy, Suspense, useState, useRef, useEffect } from "react";
 
@@ -260,6 +262,8 @@ function PlotLine(props: {
   const t0 = win ? Math.max(tMin, t1 - win.span) : tMin;
   const winSpan = Math.max(1, t1 - t0);
 
+  const ghostVersion = getGhostVersion();
+
   const view = useMemo(() => {
     if (series.length < 2) return null;
 
@@ -278,8 +282,28 @@ function PlotLine(props: {
     const stride = Math.max(1, Math.ceil(slice.length / 1200));
     const pts = stride === 1 ? slice : slice.filter((_, i) => i % stride === 0 || i === slice.length - 1);
 
+    // Comparison overlay: same field from the reference flight, already
+    // liftoff-aligned. Included in the y-fit so both traces stay on scale.
+    const ghost = getGhost();
+    let ghostPts: Array<{ t: number; y: number }> = [];
+    if (ghost) {
+      for (const f of ghost.frames as any[]) {
+        const yRaw = f?.[props.yKey];
+        const t = f?.t_ms;
+        if (typeof yRaw !== "number" || !Number.isFinite(yRaw) || typeof t !== "number") continue;
+        if (t < t0 || t > t1) continue;
+        ghostPts.push({ t, y: props.transformY ? props.transformY(yRaw) : yRaw });
+      }
+      const gStride = Math.max(1, Math.ceil(ghostPts.length / 1200));
+      if (gStride > 1) ghostPts = ghostPts.filter((_, i) => i % gStride === 0);
+    }
+
     let yMin = Infinity, yMax = -Infinity;
     for (const p of pts) {
+      if (p.y < yMin) yMin = p.y;
+      if (p.y > yMax) yMax = p.y;
+    }
+    for (const p of ghostPts) {
       if (p.y < yMin) yMin = p.y;
       if (p.y > yMax) yMax = p.y;
     }
@@ -296,6 +320,16 @@ function PlotLine(props: {
       })
       .join(" ");
 
+    const ghostPath = ghostPts.length >= 2
+      ? ghostPts
+          .map((p, i) => {
+            const px = ((p.t - t0) / winSpan) * W;
+            const py = H - ((p.y - yMin) / ySpan) * H;
+            return `${i === 0 ? "M" : "L"} ${px.toFixed(1)} ${py.toFixed(1)}`;
+          })
+          .join(" ")
+      : null;
+
     // Event markers inside the window.
     const markers: Array<{ frac: number; label: string }> = [];
     const seen = new Set<string>();
@@ -309,8 +343,8 @@ function PlotLine(props: {
       markers.push({ frac: (f.t_ms - t0) / winSpan, label });
     }
 
-    return { path, yMin: yMin + pad, yMax: yMax - pad, markers, pts };
-  }, [series, props.frames, t0, t1, winSpan]);
+    return { path, ghostPath, yMin: yMin + pad, yMax: yMax - pad, markers, pts };
+  }, [series, props.frames, t0, t1, winSpan, ghostVersion]);
 
   // Wheel zoom needs a non-passive listener (React's synthetic wheel can't
   // preventDefault). Attached ONCE; live values flow through a ref so we don't
@@ -422,6 +456,18 @@ function PlotLine(props: {
         }}
       >
         <svg viewBox="0 0 1000 1000" width="100%" height={props.fill ? "100%" : h} preserveAspectRatio="none" style={{ display: "block", ...(props.fill ? { position: "absolute", inset: 0 } : {}) }}>
+          {view?.ghostPath && (
+            <path
+              d={view.ghostPath}
+              fill="none"
+              stroke="var(--vx-fg-dim)"
+              strokeWidth={5}
+              strokeDasharray="14 10"
+              strokeLinejoin="round"
+              opacity={0.55}
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
           <path
             d={view?.path ?? ""}
             fill="none"
@@ -990,6 +1036,7 @@ export function renderWidget(args: {
   if (widgetId === "link.quality") {
     const rssi = latest?.rssi_dbm;
     const snr = latest?.snr_db;
+    const crcStats = getCrcStats(); // session wire-integrity counters
 
     // Frame rate + gap heuristic from recent frame spacing.
     let rateHz: number | undefined, gapPct: number | undefined;
@@ -1036,7 +1083,7 @@ export function renderWidget(args: {
     return (
       <div style={{ display: "grid", gap: 12, height: "100%", alignContent: "start" }}>
         <BigReadout value={typeof rssi === "number" ? String(Math.round(rssi)) : "—"} unit="dBm RSSI" accent={accent} />
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${crcStats.ok + crcStats.bad > 0 ? 4 : 3}, 1fr)`, gap: 8 }}>
           <StatTile label="SNR" value={typeof snr === "number" ? snr.toFixed(1) : "—"} unit="dB" />
           <StatTile label="RATE" value={rateHz !== undefined ? rateHz.toFixed(1) : "—"} unit="Hz" />
           {lossPct !== undefined ? (
@@ -1048,6 +1095,13 @@ export function renderWidget(args: {
             />
           ) : (
             <StatTile label="GAPS" value={gapPct !== undefined ? String(gapPct) : "—"} unit="%" />
+          )}
+          {crcStats.ok + crcStats.bad > 0 && (
+            <StatTile
+              label="CRC ERR"
+              value={String(crcStats.bad)}
+              accent={crcStats.bad > 0 ? "var(--vx-caution)" : "var(--vx-go)"}
+            />
           )}
         </div>
       </div>

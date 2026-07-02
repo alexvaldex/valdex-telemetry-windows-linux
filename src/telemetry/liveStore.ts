@@ -1,5 +1,5 @@
 import { initialTelemetryState, type TelemetryState } from "./store";
-import { ingestLineInPlace } from "./ingest";
+import { ingestLineInPlace, resetCrcStats } from "./ingest";
 
 export type LiveState = TelemetryState & {
   connected: boolean;
@@ -46,6 +46,7 @@ class LiveStore {
   }
 
   reset() {
+    resetCrcStats();
     this.pending = initialTelemetryState();
     this.frameTimestamps = [];
     this.dirty = true;

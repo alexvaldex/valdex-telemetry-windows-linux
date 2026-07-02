@@ -2,6 +2,18 @@ import { MAX_FRAMES, MAX_RAW_LINES, type TelemetryState } from "./store";
 import { normalizeTelemetryFrame } from "./schema";
 import { isTelemetryFrameV1 } from "./validate";
 import { applyFieldMap, trackUnknownKeys } from "./fieldMap";
+import { verifyAndStrip } from "./crc";
+
+/** Wire-integrity counters for the current session (shown in Link Quality). */
+let crcOk = 0;
+let crcBad = 0;
+export function getCrcStats() {
+  return { ok: crcOk, bad: crcBad };
+}
+export function resetCrcStats() {
+  crcOk = 0;
+  crcBad = 0;
+}
 
 /**
  * Hot-path ingest: mutates the given state's arrays in place (no per-line
@@ -12,9 +24,17 @@ export function ingestLineInPlace(state: TelemetryState, line: string): void {
   state.rawLines.push(line);
   if (state.rawLines.length > MAX_RAW_LINES) state.rawLines.shift();
 
+  // Optional NMEA-style CRC suffix: verify, count, and drop corrupt lines.
+  const { payload, crc } = verifyAndStrip(line);
+  if (crc === "ok") crcOk++;
+  else if (crc === "bad") {
+    crcBad++;
+    return;
+  }
+
   let raw: unknown;
   try {
-    raw = JSON.parse(line);
+    raw = JSON.parse(payload);
   } catch {
     return;
   }

@@ -52,6 +52,11 @@ One JSON object per line (NDJSON), `t_ms` required, everything else optional:
 Common aliases (`alt`, `altitude_ft`, `vz_fps`, `temp_f`, `pressure_hpa`, …)
 map automatically; anything else can be mapped in-app via **Field Map**.
 
+Optional wire integrity: append an NMEA-style checksum — `{...}*1A2B` where
+the hex digits are **CRC-16/CCITT-FALSE** over the UTF-8 JSON text before the
+`*`. Corrupt lines are dropped and counted (Link Quality widget). Optional
+`seq` packet counters give true loss statistics.
+
 ## Architecture
 
 Strictly layered, one direction only — the UI never touches hardware:

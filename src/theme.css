@@ -131,3 +131,38 @@ body {
   0%, 100% { box-shadow: 0 0 0 0 var(--vx-crit-glow); }
   50% { box-shadow: 0 0 0 6px transparent; }
 }
+
+/* ============================================================
+   Field mode — maximum-contrast variant for direct sunlight.
+   Pure black background, pure white text, brighter structure
+   lines, saturated signal colors. Toggled via <html class="vx-field">.
+   ============================================================ */
+:root.vx-field {
+  --vx-bg0: #000000;
+  --vx-bg1: #000000;
+  --vx-bg2: #05070c;
+  --vx-panel: rgba(0, 0, 0, 0.85);
+  --vx-panel-solid: #000000;
+
+  --vx-line: rgba(160, 195, 255, 0.4);
+  --vx-line-strong: rgba(190, 215, 255, 0.7);
+  --vx-grid: transparent;
+
+  --vx-fg: #ffffff;
+  --vx-fg-dim: #d6e0f5;
+  --vx-fg-faint: #9aa9c9;
+
+  --vx-blue: #40b4ff;
+  --vx-blue-bright: #7fd4ff;
+  --vx-go: #3dffa0;
+  --vx-caution: #ffc23d;
+  --vx-crit: #ff5560;
+}
+
+:root.vx-field body {
+  background: #000000;
+}
+
+:root.vx-field #root::before {
+  display: none; /* no decorative grid competing with sunlight */
+}

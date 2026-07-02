@@ -23,6 +23,8 @@ export class TauriSerialConnection implements Connection {
   private lineListeners = new Set<(line: string) => void>();
   private statusListeners = new Set<(status: ConnectionStatus) => void>();
   private unlisteners: UnlistenFn[] = [];
+  private opts: ConnectOptions | null = null;
+  private userClosed = false;
 
   onLine(cb: (line: string) => void): () => void {
     this.lineListeners.add(cb);
@@ -42,13 +44,15 @@ export class TauriSerialConnection implements Connection {
   async connect(opts: ConnectOptions): Promise<void> {
     if (!opts.path) throw new Error("Select a serial port first (use Refresh to scan).");
     this.setStatus("connecting");
+    this.opts = opts;
+    this.userClosed = false;
     try {
       this.unlisteners.push(
         await listen<string>("serial-line", (e) => this.lineListeners.forEach((cb) => cb(e.payload)))
       );
       this.unlisteners.push(
         await listen<string>("serial-error", () => {
-          void this.disconnect();
+          void this.attemptReconnect();
         })
       );
       await invoke("serial_open", { path: opts.path, baud: opts.baudRate });
@@ -58,6 +62,28 @@ export class TauriSerialConnection implements Connection {
       this.setStatus("disconnected");
       throw err;
     }
+  }
+
+  /** Unexpected drop: retry the same port with backoff before giving up. */
+  private async attemptReconnect() {
+    if (this.userClosed || !this.opts) {
+      void this.disconnect();
+      return;
+    }
+    this.setStatus("connecting");
+    for (const delayMs of [1000, 2000, 4000]) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      if (this.userClosed) return;
+      try {
+        await invoke("serial_open", { path: this.opts.path, baud: this.opts.baudRate });
+        this.setStatus("connected");
+        return;
+      } catch {
+        // device still absent — keep backing off
+      }
+    }
+    await this.cleanup();
+    this.setStatus("disconnected");
   }
 
   async write(line: string): Promise<void> {
@@ -72,6 +98,7 @@ export class TauriSerialConnection implements Connection {
   }
 
   async disconnect(): Promise<void> {
+    this.userClosed = true;
     try { await invoke("serial_close"); } catch { /* ok */ }
     await this.cleanup();
     this.setStatus("disconnected");

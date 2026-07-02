@@ -19,6 +19,7 @@ import { derivePhase, phaseIndex } from "../telemetry/vehicleStore";
 import { ingestLine, ingestLineInPlace } from "../telemetry/ingest";
 import { initialTelemetryState } from "../telemetry/store";
 import { computeFlightSummary } from "../widgets/flightSummary";
+import { crc16ccitt, appendChecksum, verifyAndStrip } from "../telemetry/crc";
 import { tiltDegFromQuat } from "../widgets/renderers";
 import type { TelemetryFrameV1 } from "../telemetry/types";
 
@@ -154,6 +155,28 @@ describe("tilt from quaternion", () => {
   it("is spin-invariant (roll about the long axis is not tilt)", () => {
     // 90° rotation about Y (the long axis) leaves the nose pointing up.
     expect(tiltDegFromQuat(Math.SQRT1_2, 0, Math.SQRT1_2, 0)).toBeCloseTo(0, 6);
+  });
+});
+
+describe("wire checksum (CRC-16/CCITT-FALSE)", () => {
+  it("matches the standard check vector", () => {
+    expect(crc16ccitt("123456789")).toBe(0x29b1);
+  });
+  it("round-trips append/verify and detects tampering", () => {
+    const line = '{"v":1,"t_ms":123,"alt_m":100.5}';
+    const summed = appendChecksum(line);
+    expect(verifyAndStrip(summed)).toEqual({ payload: line, crc: "ok" });
+    const tampered = summed.replace('"alt_m":100.5', '"alt_m":900.5');
+    expect(verifyAndStrip(tampered).crc).toBe("bad");
+    expect(verifyAndStrip(line)).toEqual({ payload: line, crc: "none" });
+  });
+  it("drops corrupt lines in ingest but accepts unsummed + valid-summed", () => {
+    let st = initialTelemetryState();
+    const good = appendChecksum(JSON.stringify({ v: 1, t_ms: 1, alt_m: 10 }));
+    st = ingestLine(st, good);
+    st = ingestLine(st, good.replace('"alt_m":10', '"alt_m":99')); // corrupt vs CRC
+    st = ingestLine(st, JSON.stringify({ v: 1, t_ms: 2, alt_m: 20 })); // no CRC — fine
+    expect(st.frames.map((f) => f.alt_m)).toEqual([10, 20]);
   });
 });
 

@@ -1,4 +1,5 @@
 import type { Connection, ConnectOptions, ConnectionStatus } from "./types";
+import { appendChecksum } from "../telemetry/crc";
 
 type Phase = "idle" | "boost" | "coast" | "drogue" | "main" | "landed";
 
@@ -385,7 +386,7 @@ export class SimulatorConnection implements Connection {
       this.pendingEvent = undefined;
     }
 
-    const line = JSON.stringify(frame);
+    const line = appendChecksum(JSON.stringify(frame));
     this.lineListeners.forEach((cb) => cb(line));
 
     this.tickBooster(dtSec);
@@ -441,6 +442,7 @@ export class SimulatorConnection implements Connection {
       frame.event = b.pendingEvent;
       b.pendingEvent = undefined;
     }
-    this.lineListeners.forEach((cb) => cb(JSON.stringify(frame)));
+    const line = appendChecksum(JSON.stringify(frame));
+    this.lineListeners.forEach((cb) => cb(line));
   }
 }
