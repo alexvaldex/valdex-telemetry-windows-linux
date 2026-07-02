@@ -17,6 +17,22 @@ const PAD_LAT = 32.9903;   // ~ FAR / Mojave-ish
 const PAD_LON = -106.9749;
 const PAD_ALT_M = 1400;    // pad elevation above sea level (affects baro/temp)
 const M_PER_DEG_LAT = 111_320;
+
+/* Minimal quaternion helpers for the simulated attitude (w,x,y,z). */
+type Quat = { w: number; x: number; y: number; z: number };
+function qAxis(ax: number, ay: number, az: number, deg: number): Quat {
+  const r = (deg * Math.PI) / 180;
+  const s = Math.sin(r / 2);
+  return { w: Math.cos(r / 2), x: ax * s, y: ay * s, z: az * s };
+}
+function qMul(a: Quat, b: Quat): Quat {
+  return {
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+  };
+}
 const WIND_E_MPS = 4.5;    // eastward wind pushes vehicle downrange under chute
 const WIND_N_MPS = 1.5;
 
@@ -42,6 +58,7 @@ export class SimulatorConnection implements Connection {
   private drogueCont: 0 | 1 = 1;
   private mainCont: 0 | 1 = 1;
   private drogueEventSent = false;
+  private spinDeg = 0; // accumulated roll about the long axis
 
   onLine(cb: (line: string) => void): () => void {
     this.lineListeners.add(cb);
@@ -73,6 +90,7 @@ export class SimulatorConnection implements Connection {
     this.drogueCont = 1;
     this.mainCont = 1;
     this.drogueEventSent = false;
+    this.spinDeg = 0;
 
     this.setStatus("connected");
 
@@ -215,6 +233,38 @@ export class SimulatorConnection implements Connection {
     const pressure_pa = 101325 * Math.pow(1 - 2.25577e-5 * altAbs, 5.25588);
     const humidity_pct = Math.max(8, Math.min(95, 55 - alt / 60 + (Math.random() - 0.5) * 2));
 
+    // Simulated attitude: roll about the long axis + phase-dependent tilt.
+    // Identity quaternion = nose straight up.
+    let tiltDeg = 0.4 * Math.sin(this.simMs / 900); // slight breathing on the pad
+    let tiltAxisDeg = 25;
+    switch (this.phase) {
+      case "boost":
+        this.spinDeg += 220 * dtSec;             // fast roll under thrust
+        tiltDeg = Math.min(4, dt * 2);           // small weathercock into the wind
+        break;
+      case "coast":
+        this.spinDeg += 50 * dtSec;              // roll decays after burnout
+        tiltDeg = Math.min(26, 4 + dt * 1.6);    // gravity turn builds
+        break;
+      case "drogue":
+        this.spinDeg += 18 * dtSec;
+        tiltDeg = 14 * Math.sin(2 * Math.PI * 0.35 * dt); // pendulum swing under drogue
+        tiltAxisDeg = 25 + dt * 30;                        // swing plane precesses
+        break;
+      case "main":
+        this.spinDeg += 6 * dtSec;
+        tiltDeg = 6 * Math.sin(2 * Math.PI * 0.5 * dt);   // gentler swing under main
+        tiltAxisDeg = 25 + dt * 15;
+        break;
+      case "landed":
+        tiltDeg = 84; // resting on its side in the dirt
+        tiltAxisDeg = 10;
+        break;
+    }
+    const axR = (tiltAxisDeg * Math.PI) / 180;
+    const q = qMul(qAxis(Math.cos(axR), 0, Math.sin(axR), tiltDeg), qAxis(0, 1, 0, this.spinDeg % 360));
+    const r4 = (n: number) => Math.round(n * 10000) / 10000;
+
     const frame: Record<string, unknown> = {
       v: 1,
       t_ms: Math.round(this.simMs),
@@ -232,6 +282,7 @@ export class SimulatorConnection implements Connection {
       temp_c: Math.round(temp_c * 10) / 10,
       pressure_pa: Math.round(pressure_pa),
       humidity_pct: Math.round(humidity_pct),
+      q_w: r4(q.w), q_x: r4(q.x), q_y: r4(q.y), q_z: r4(q.z),
       pyro_drogue_cont: this.drogueCont,
       pyro_main_cont: this.mainCont,
     };

@@ -4,10 +4,131 @@ import type { WidgetId } from "./registry";
 import type { TelemetryFrameV1 } from "../telemetry/types";
 import type { UnitSystem } from "../units";
 
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
 
 // Heavy three.js viewer, code-split so it downloads only when a 3D widget shows.
 const RocketViewer = lazy(() => import("./RocketViewer"));
+
+/** --------- Pre-flight checklist (L3-style) --------- */
+type ChecklistItem = { id: string; text: string; done: boolean };
+
+const DEFAULT_CHECKLIST = [
+  "Motor assembled per manufacturer spec",
+  "Recovery harness secured & inspected",
+  "Drogue packed, chute protector in place",
+  "Main packed, chute protector in place",
+  "Ejection charges sized & installed",
+  "Altimeter armed — continuity verified",
+  "GPS tracker on — fix acquired",
+  "Rail buttons / launch lugs secured",
+  "CG verified against CP (stable margin)",
+  "Igniter installed at the pad only",
+  "RSO / LCO clearance — range is GO",
+];
+
+function loadChecklist(): ChecklistItem[] {
+  try {
+    const raw = localStorage.getItem("vx.checklist");
+    if (raw) return JSON.parse(raw) as ChecklistItem[];
+  } catch {
+    // fall through to defaults
+  }
+  return DEFAULT_CHECKLIST.map((text, i) => ({ id: `c${i}`, text, done: false }));
+}
+
+function ChecklistPanel() {
+  const [items, setItems] = useState<ChecklistItem[]>(loadChecklist);
+  const [newText, setNewText] = useState("");
+
+  function persist(next: ChecklistItem[]) {
+    setItems(next);
+    localStorage.setItem("vx.checklist", JSON.stringify(next));
+  }
+
+  const done = items.filter((i) => i.done).length;
+  const allGo = items.length > 0 && done === items.length;
+
+  return (
+    <div style={{ display: "grid", gridTemplateRows: "auto auto 1fr auto", gap: 10, height: "100%", minHeight: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+        <span className="vx-num" style={{ fontSize: 13, color: "var(--vx-fg-dim)" }}>{done}/{items.length}</span>
+        <span
+          style={{
+            fontFamily: "var(--vx-font-display)", fontWeight: 700, fontSize: 13, letterSpacing: "0.12em",
+            color: allGo ? "var(--vx-go)" : "var(--vx-caution)",
+          }}
+        >
+          {allGo ? "● ALL SYSTEMS GO" : "● HOLD — ITEMS OPEN"}
+        </span>
+      </div>
+
+      <div style={{ height: 6, borderRadius: 3, background: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
+        <div
+          style={{
+            width: `${items.length ? (done / items.length) * 100 : 0}%`, height: "100%",
+            background: allGo ? "var(--vx-go)" : "var(--vx-blue)", transition: "width 0.25s ease",
+          }}
+        />
+      </div>
+
+      <div style={{ overflow: "auto", minHeight: 0, display: "grid", gap: 4, alignContent: "start" }}>
+        {items.map((item) => (
+          <label
+            key={item.id}
+            style={{
+              display: "flex", gap: 10, alignItems: "center", padding: "7px 9px", borderRadius: 3,
+              border: "1px solid var(--vx-line)", background: item.done ? "rgba(36,224,138,0.06)" : "rgba(10,16,30,0.5)",
+              cursor: "pointer", fontSize: 13,
+              color: item.done ? "var(--vx-fg-dim)" : "var(--vx-fg)",
+              textDecoration: item.done ? "line-through" : "none",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={item.done}
+              onChange={() => persist(items.map((i) => (i.id === item.id ? { ...i, done: !i.done } : i)))}
+            />
+            <span style={{ flex: 1 }}>{item.text}</span>
+            <button
+              onClick={(e) => { e.preventDefault(); persist(items.filter((i) => i.id !== item.id)); }}
+              style={{ background: "none", border: "none", color: "var(--vx-fg-faint)", cursor: "pointer", fontSize: 14 }}
+              title="Remove item"
+            >
+              ×
+            </button>
+          </label>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 6 }}>
+        <input
+          className="vx-input"
+          style={{ flex: 1 }}
+          placeholder="Add checklist item…"
+          value={newText}
+          onChange={(e) => setNewText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && newText.trim()) {
+              persist([...items, { id: `c${Date.now()}`, text: newText.trim(), done: false }]);
+              setNewText("");
+            }
+          }}
+        />
+        <button
+          className="vx-btn"
+          onClick={() => persist(loadChecklistDefaults())}
+          title="Reset all items to unchecked defaults"
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function loadChecklistDefaults(): ChecklistItem[] {
+  return DEFAULT_CHECKLIST.map((text, i) => ({ id: `c${i}`, text, done: false }));
+}
 
 import { FlightSummaryWidget } from "./flightSummary";
 import { RangeMapWidget } from "./rangeMap";
@@ -626,6 +747,10 @@ export function renderWidget(args: {
         </div>
       </div>
     );
+  }
+
+  if (widgetId === "checklist.panel") {
+    return <ChecklistPanel />;
   }
 
   return (

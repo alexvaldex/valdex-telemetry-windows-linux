@@ -27,6 +27,8 @@ import {
   type StageRole,
 } from "./telemetry/vehicleStore";
 import type { Model3D, UpAxis } from "./widgets/rocketModel";
+import { getFieldMap, saveFieldMap, getUnknownKeys, V1_TARGET_KEYS, type FieldMapping } from "./telemetry/fieldMap";
+import { speak } from "./audio/voice";
 
 /** ---------- Types ---------- */
 type WidgetInstance = { key: string; widgetId: WidgetId };
@@ -159,6 +161,25 @@ function normalizeRequires(req: unknown): string[] {
   if (!req) return [];
   if (Array.isArray(req)) return req.filter(Boolean).map(String);
   return [String(req)];
+}
+
+/** Mission-control style voice line for a flight event frame. */
+function calloutText(f: TelemetryFrameV1, units: UnitSystem): string {
+  const ev = (f.event || "").toUpperCase();
+  const alt =
+    typeof f.alt_m === "number"
+      ? units === "imperial"
+        ? `${Math.round(f.alt_m * 3.28084)} feet`
+        : `${Math.round(f.alt_m)} meters`
+      : "";
+  if (ev.includes("ARM")) return "Vehicle armed";
+  if (ev.includes("LIFT")) return "Liftoff";
+  if (ev.includes("BURN")) return "Burnout";
+  if (ev.includes("APOG")) return alt ? `Apogee, ${alt}` : "Apogee";
+  if (ev.includes("DROG")) return "Drogue deployed";
+  if (ev.includes("MAIN")) return alt ? `Main deployed, ${alt}` : "Main deployed";
+  if (ev.includes("LAND")) return "Touchdown. Vehicle safe.";
+  return f.event || "";
 }
 
 function batteryPercentFromCellV(cellV: number, chem: BatteryChem): number {
@@ -498,6 +519,34 @@ export default function App() {
   /** Vehicle (3D model + flight config) modal */
   const [vehicleOpen, setVehicleOpen] = useState(false);
 
+  /** Field remapping modal */
+  const [fieldMapOpen, setFieldMapOpen] = useState(false);
+
+  /** Voice callouts */
+  const [voiceOn, setVoiceOn] = useState<boolean>(() => {
+    try { return localStorage.getItem("vx.voice") !== "0"; } catch { return true; }
+  });
+  function toggleVoice() {
+    setVoiceOn((v) => {
+      const next = !v;
+      localStorage.setItem("vx.voice", next ? "1" : "0");
+      return next;
+    });
+  }
+
+  /** Grid width — measured from the shell so the layout spans the full viewport */
+  const gridHostRef = useRef<HTMLDivElement | null>(null);
+  const [gridWidth, setGridWidth] = useState(1200);
+  useEffect(() => {
+    const el = gridHostRef.current;
+    if (!el) return;
+    const measure = () => setGridWidth(Math.max(480, Math.floor(el.clientWidth)));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const fg = useMemo(() => autoTextColor(theme.bgB), [theme.bgB]);
   const chipFg = useMemo(() => autoTextColor("#1b2339"), []); // stable
 
@@ -665,6 +714,7 @@ export default function App() {
     lastLineAtRef.current = performance.now();
     lastFrameAtRef.current = 0;
     dtMsWindowRef.current = [];
+    lastCalloutTRef.current = -1;
 
     liveStore.reset();
 
@@ -734,7 +784,7 @@ export default function App() {
     const sizeW = w ?? def.defaultSize?.w ?? 6;
     const sizeH = h ?? def.defaultSize?.h ?? 6;
 
-    const nextLayout: Layout = [...layout, { i: key, x: 0, y: Infinity, w: sizeW, h: sizeH } as any];
+    const nextLayout: Layout = [...layout, { i: key, x: 0, y: Infinity, w: sizeW, h: sizeH, minW: 2, minH: 3 } as any];
 
     setInstances(nextInstances);
     setLayout(nextLayout);
@@ -1039,6 +1089,49 @@ export default function App() {
     downloadTextFile(filename, toCSV(frames), "text/csv");
   }
 
+  /** Export the GPS track as KML for Google Earth / recovery planning. */
+  function exportKML() {
+    const src = playback.mode === "playback" ? playback.frames : telemetry.frames;
+    const gps = src.filter((f) => typeof f.lat === "number" && typeof f.lon === "number");
+    if (!gps.length) {
+      window.alert("No GPS data in this session to export.");
+      return;
+    }
+    const coords = gps
+      .map((f) => `${f.lon},${f.lat},${typeof f.alt_m === "number" ? f.alt_m.toFixed(1) : "0"}`)
+      .join("\n            ");
+    const events = gps.filter((f) => typeof f.event === "string" && f.event.trim());
+    const placemarks = events
+      .map(
+        (f) => `
+    <Placemark>
+      <name>${(f.event as string).replace(/[<>&]/g, "")}</name>
+      <Point><altitudeMode>relativeToGround</altitudeMode><coordinates>${f.lon},${f.lat},${typeof f.alt_m === "number" ? f.alt_m.toFixed(1) : "0"}</coordinates></Point>
+    </Placemark>`
+      )
+      .join("");
+    const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>VX Telemetry flight track</name>
+    <Style id="track"><LineStyle><color>ffff9d1f</color><width>3</width></LineStyle></Style>
+    <Placemark>
+      <name>Flight path</name>
+      <styleUrl>#track</styleUrl>
+      <LineString>
+        <extrude>1</extrude>
+        <altitudeMode>relativeToGround</altitudeMode>
+        <coordinates>
+            ${coords}
+        </coordinates>
+      </LineString>
+    </Placemark>${placemarks}
+  </Document>
+</kml>`;
+    const stamp = new Date(sessionStartRef.current).toISOString().replace(/[:.]/g, "-").split("Z")[0];
+    downloadTextFile(`valdex_track_${stamp}.kml`, kml, "application/vnd.google-earth.kml+xml");
+  }
+
   /** Link health */
   const linkHealth = useMemo(() => {
     const now = performance.now();
@@ -1181,6 +1274,15 @@ export default function App() {
     };
   }, [display.frames]);
 
+  // Predicted apogee during ascent: h + v²/2g (drag-free ballistic floor).
+  const predApogeeM = useMemo(() => {
+    if (flightPhase !== "BOOST" && flightPhase !== "COAST") return undefined;
+    const alt = display.latest?.alt_m;
+    const vel = display.latest?.vel_mps;
+    if (typeof alt !== "number" || typeof vel !== "number" || vel <= 0) return undefined;
+    return alt + (vel * vel) / (2 * 9.80665);
+  }, [flightPhase, display.latest]);
+
   // GO / NO-GO readiness board.
   type GoState = "go" | "caution" | "crit" | "nodata";
   const readiness = useMemo(() => {
@@ -1236,6 +1338,29 @@ export default function App() {
 
   const goStateText: Record<GoState, string> = { go: "GO", caution: "HOLD", crit: "NO-GO", nodata: "—" };
 
+  /** Voice callouts on flight events (live only). Scans frames so batched
+      ticks can't skip an event frame. */
+  const lastCalloutTRef = useRef<number>(-1);
+  useEffect(() => {
+    if (playback.mode !== "live") return;
+    const frames = telemetry.frames;
+    if (!frames.length) return;
+    // First sight of data: don't replay the backlog.
+    if (lastCalloutTRef.current < 0) {
+      lastCalloutTRef.current = frames[frames.length - 1].t_ms;
+      return;
+    }
+    for (const f of frames) {
+      if (f.t_ms <= lastCalloutTRef.current) continue;
+      if (typeof f.event === "string" && f.event.trim()) {
+        lastCalloutTRef.current = f.t_ms;
+        if (voiceOn) speak(calloutText(f, globalUnits));
+      }
+    }
+    const last = frames[frames.length - 1];
+    if (last.t_ms > lastCalloutTRef.current) lastCalloutTRef.current = last.t_ms;
+  }, [telemetry.frames, voiceOn, playback.mode, globalUnits]);
+
   /** Master caution: active whenever any critical alert stands. */
   const critAlerts = useMemo(() => alerts.filter((a) => a.level === "crit"), [alerts]);
   const critSig = useMemo(() => critAlerts.map((a) => a.id).sort().join("|"), [critAlerts]);
@@ -1244,10 +1369,12 @@ export default function App() {
   const alarmActive = cautionActive && !alarmMuted && critSig !== ackedSig;
 
   useEffect(() => {
-    if (alarmActive) startAlarm();
-    else stopAlarm();
+    if (alarmActive) {
+      startAlarm();
+      if (voiceOn) speak("Master caution");
+    } else stopAlarm();
     return () => stopAlarm();
-  }, [alarmActive]);
+  }, [alarmActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A brand-new caution set clears any prior acknowledgement.
   useEffect(() => {
@@ -1794,7 +1921,11 @@ export default function App() {
           <div className="vx-readouts" style={{ flex: 1, minWidth: 320 }}>
             <Readout k="ALT" v={fmtUnit(display.latest?.alt_m, globalUnits, "alt")} />
             <Readout k="VEL" v={fmtUnit(display.latest?.vel_mps, globalUnits, "vel")} />
-            <Readout k="APOGEE" peak v={fmtUnit(peaks.apogeeM, globalUnits, "alt")} />
+            {predApogeeM !== undefined ? (
+              <Readout k="PRED AP" peak v={fmtUnit(predApogeeM, globalUnits, "alt")} />
+            ) : (
+              <Readout k="APOGEE" peak v={fmtUnit(peaks.apogeeM, globalUnits, "alt")} />
+            )}
             <Readout k="MAX V" peak v={fmtUnit(peaks.maxVelMps, globalUnits, "vel")} />
             <Readout k="MAX G" peak v={peaks.maxAccelG !== undefined ? { value: peaks.maxAccelG.toFixed(1), unit: "g" } : { value: "—", unit: "" }} />
             <Readout k="RSSI" v={typeof linkHealth.rssi === "number" ? { value: String(linkHealth.rssi), unit: "dBm" } : { value: "—", unit: "" }} />
@@ -1824,6 +1955,13 @@ export default function App() {
             </button>
 
             <button className="vx-btn" onClick={() => setVehicleOpen(true)} title="Vehicle setup — upload rocket CAD, staging & recovery">🚀 Vehicle</button>
+            <button
+              className={`vx-btn ${voiceOn ? "" : "vx-btn-danger"}`}
+              onClick={toggleVoice}
+              title="Voice callouts — spoken flight events (liftoff, apogee, main…)"
+            >
+              {voiceOn ? "🔈 Voice" : "🔇 Voice"}
+            </button>
             <button className="vx-btn" onClick={() => setSettingsOpen(true)} title="Settings">Settings</button>
             <button className="vx-btn" onClick={() => setPaletteOpen(true)} title="Command Palette (Ctrl+K)">⌘K</button>
           </div>
@@ -1972,6 +2110,8 @@ export default function App() {
           </button>
           <button className="vx-btn" onClick={exportSessionJSONL} title={`Export raw telemetry (Ctrl+E) (${logCount})`}>Export JSONL</button>
           <button className="vx-btn" onClick={exportFramesCSV} title="Export frames as CSV (Ctrl+Shift+E)">Export CSV</button>
+          <button className="vx-btn" onClick={exportKML} title="Export GPS track as KML (Google Earth)">Export KML</button>
+          <button className="vx-btn" onClick={() => setFieldMapOpen(true)} title="Map custom firmware field names onto the VX telemetry contract">Field Map</button>
 
           <label className="vx-btn" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
             Load Log
@@ -2028,16 +2168,20 @@ export default function App() {
 
       {/* Main dashboard */}
       <div className="vx-shell" onContextMenu={(e) => openMenuAt(e)}>
+        <div ref={gridHostRef}>
         <RGL
           {...({
             className: "layout",
             layout,
             cols: GRID_COLS,
             rowHeight: 30,
-            width: 1200,
+            width: gridWidth,
+            margin: [10, 10],
+            containerPadding: [0, 0],
             compactType: "vertical",
-            preventCollision: true,
+            preventCollision: false, // dragging pushes neighbors out of the way instead of blocking
             draggableHandle: ".vx-titlebar",
+            draggableCancel: "button, select, input, textarea, label, a",
             resizeHandles: isLayoutEditable ? ["se", "s", "e", "n", "w", "ne", "nw", "sw"] : [],
             isDraggable: isLayoutEditable,
             isResizable: isLayoutEditable,
@@ -2067,6 +2211,7 @@ export default function App() {
             </div>
           ))}
         </RGL>
+        </div>
       </div>
 
       {/* Context Menu */}
@@ -2137,6 +2282,9 @@ export default function App() {
 
       {/* Vehicle Modal */}
       {vehicleOpen && <VehicleModal onClose={() => setVehicleOpen(false)} />}
+
+      {/* Field Map Modal */}
+      {fieldMapOpen && <FieldMapModal onClose={() => setFieldMapOpen(false)} />}
 
       {/* Command Palette */}
       {paletteOpen && (
@@ -2314,6 +2462,106 @@ function ContextMenu(props: {
         <div>
           <div style={{ fontWeight: 900 }}>Close</div>
           <div className="vx-menu-muted">Esc</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** ---------- FieldMapModal — map firmware field names to the V1 contract ---------- */
+function FieldMapModal(props: { onClose: () => void }) {
+  const [rows, setRows] = useState<FieldMapping[]>(() => {
+    const existing = getFieldMap();
+    return existing.length ? existing : [{ source: "", target: "" }];
+  });
+  const [unknown, setUnknown] = useState<string[]>(() => getUnknownKeys());
+
+  // Refresh the unmapped-key suggestions while the modal is open.
+  useEffect(() => {
+    const t = window.setInterval(() => setUnknown(getUnknownKeys()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  function commit(next: FieldMapping[]) {
+    setRows(next);
+    saveFieldMap(next); // applies to the live ingest path immediately
+  }
+
+  function setRow(i: number, patch: Partial<FieldMapping>) {
+    commit(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  }
+
+  const mappedSources = new Set(rows.map((r) => r.source));
+  const suggestions = unknown.filter((k) => !mappedSources.has(k)).slice(0, 12);
+
+  return (
+    <div className="vx-modal-backdrop" onMouseDown={props.onClose}>
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        style={{
+          width: "min(640px, 94vw)", maxHeight: "86vh", overflow: "auto",
+          background: "rgba(7,11,22,0.98)", border: "1px solid var(--vx-line-strong)",
+          borderRadius: 4, boxShadow: "0 22px 70px rgba(0,0,0,0.75)", padding: 20,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>Field Map</div>
+          <button className="vx-xbtn" onClick={props.onClose}>×</button>
+        </div>
+
+        <div style={{ fontSize: 12, color: "var(--vx-fg-dim)", lineHeight: 1.6, marginBottom: 12 }}>
+          If your flight computer sends different field names, map them here — e.g. <code>altitude_agl</code> →{" "}
+          <code>alt_m</code>. Applied live to every incoming line; changes take effect immediately.
+        </div>
+
+        {/* Mapping rows */}
+        <div style={{ display: "grid", gap: 8 }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr auto", gap: 8, alignItems: "center" }}>
+              <input
+                className="vx-input"
+                placeholder="firmware field (e.g. altitude_agl)"
+                value={r.source}
+                onChange={(e) => setRow(i, { source: e.target.value })}
+              />
+              <span style={{ color: "var(--vx-fg-dim)" }}>→</span>
+              <select className="vx-select" value={r.target} onChange={(e) => setRow(i, { target: e.target.value })}>
+                <option value="">— target field —</option>
+                {V1_TARGET_KEYS.map((k) => (
+                  <option key={k} value={k}>{k}</option>
+                ))}
+              </select>
+              <button className="vx-xbtn" onClick={() => commit(rows.filter((_, j) => j !== i))} title="Remove mapping">×</button>
+            </div>
+          ))}
+        </div>
+
+        <button className="vx-btn" style={{ marginTop: 10 }} onClick={() => setRows([...rows, { source: "", target: "" }])}>
+          + Add mapping
+        </button>
+
+        {/* Live suggestions from the incoming stream */}
+        <div className="vx-card" style={{ marginTop: 14 }}>
+          <div className="vx-label" style={{ marginBottom: 8 }}>Unrecognized fields seen in this stream</div>
+          {suggestions.length ? (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {suggestions.map((k) => (
+                <button
+                  key={k}
+                  className="vx-chip"
+                  style={{ cursor: "pointer" }}
+                  title="Click to start mapping this field"
+                  onClick={() => setRows([...rows.filter((r) => r.source || r.target), { source: k, target: "" }])}
+                >
+                  {k}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--vx-fg-faint)" }}>
+              None — connect a stream and any unknown field names will appear here.
+            </div>
+          )}
         </div>
       </div>
     </div>

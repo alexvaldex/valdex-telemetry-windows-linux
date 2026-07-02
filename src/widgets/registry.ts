@@ -10,7 +10,8 @@ export type WidgetId =
   | "imu.card"
   | "flight.summary"
   | "pyro.panel"
-  | "env.card";
+  | "env.card"
+  | "checklist.panel";
 
 export type WidgetCategory = "Core" | "Navigation" | "IMU" | "Attitude" | "Viz" | "Flight" | "Safety" | "Sensors";
 
@@ -80,8 +81,8 @@ export const WIDGETS: WidgetDef[] = [
     id: "vehicle.3d",
     name: "3D Vehicle",
     category: "Viz",
-    requires: ["q_w", "q_x", "q_y", "q_z"],
-    hardwareHint: "Quaternion required. Displays a 3D rocket model driven by q_w/x/y/z.",
+    requires: [], // always addable — shows your CAD; live attitude (q_w..q_z) drives it when present
+    hardwareHint: "Shows your uploaded rocket CAD. With quaternion telemetry (q_w/x/y/z) it flies live; without, it idles.",
     defaultSize: { w: 6, h: 8 },
     defaultView: "instrument",
     defaultTheme: { accent: "#7aa2ff" },
@@ -135,6 +136,16 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 5, h: 7 },
     defaultView: "card",
     defaultTheme: { accent: "#57c1ff" },
+  },
+  {
+    id: "checklist.panel",
+    name: "Pre-flight Checklist",
+    category: "Safety",
+    requires: [],
+    hardwareHint: "No hardware required. L3-style pre-flight checklist — progress feeds range-safety discipline.",
+    defaultSize: { w: 4, h: 10 },
+    defaultView: "card",
+    defaultTheme: { accent: "#24e08a" },
   },
 ];
 
