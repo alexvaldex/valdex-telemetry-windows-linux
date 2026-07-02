@@ -1,5 +1,5 @@
 import { initialTelemetryState, type TelemetryState } from "./store";
-import { ingestLine } from "./ingest";
+import { ingestLineInPlace } from "./ingest";
 
 export type LiveState = TelemetryState & {
   connected: boolean;
@@ -9,7 +9,10 @@ export type LiveState = TelemetryState & {
 const TICK_MS = 60; // ~16Hz UI tick, decoupled from ingest rate
 
 function snapshotOf(state: TelemetryState, connected: boolean, packetsPerSec: number): LiveState {
-  return { ...state, connected, packetsPerSec };
+  // Copy the arrays: `pending` is mutated in place on the hot path, and React
+  // consumers need referential changes per flush. Copying at the ~16 Hz flush
+  // instead of per line keeps ingest allocation-free at high frame rates.
+  return { connected, packetsPerSec, latest: state.latest, frames: state.frames.slice(), rawLines: state.rawLines.slice() };
 }
 
 class LiveStore {
@@ -32,7 +35,7 @@ class LiveStore {
   getState = (): LiveState => this.snapshot;
 
   ingest(line: string) {
-    this.pending = ingestLine(this.pending, line);
+    ingestLineInPlace(this.pending, line); // hot path: no per-line copies
     this.frameTimestamps.push(performance.now());
     this.dirty = true;
   }

@@ -312,13 +312,18 @@ function PlotLine(props: {
     return { path, yMin: yMin + pad, yMax: yMax - pad, markers, pts };
   }, [series, props.frames, t0, t1, winSpan]);
 
-  // Wheel zoom needs a non-passive listener (React's synthetic wheel can't preventDefault).
+  // Wheel zoom needs a non-passive listener (React's synthetic wheel can't
+  // preventDefault). Attached ONCE; live values flow through a ref so we don't
+  // re-attach at the UI tick rate.
+  const zoomRef = useRef({ t0, winSpan, fullSpan, tMin, tMax, hasData: series.length >= 2 });
+  zoomRef.current = { t0, winSpan, fullSpan, tMin, tMax, hasData: series.length >= 2 };
   useEffect(() => {
     const el = plotRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      if (series.length < 2) return;
+      const { t0, winSpan, fullSpan, tMin, tMax, hasData } = zoomRef.current;
+      if (!hasData) return;
       const rect = el.getBoundingClientRect();
       const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       const cursorT = t0 + frac * winSpan;
@@ -330,7 +335,7 @@ function PlotLine(props: {
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [series.length, t0, winSpan, fullSpan, tMin, tMax]);
+  }, []);
 
   function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if (e.button !== 0) return;
@@ -487,7 +492,7 @@ function PlotLine(props: {
 
 /** Off-vertical tilt in degrees: angle between the body long axis (+Y) and
     world up. 0° = pointing straight up. */
-function tiltDegFromQuat(qw?: number, qx?: number, qy?: number, qz?: number): number | null {
+export function tiltDegFromQuat(qw?: number, qx?: number, qy?: number, qz?: number): number | null {
   if (![qw, qx, qy, qz].every((n) => typeof n === "number" && Number.isFinite(n))) return null;
   const x = qx as number, z = qz as number;
   const upY = 1 - 2 * (x * x + z * z); // Y component of the rotated body-Y axis

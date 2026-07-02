@@ -14,8 +14,9 @@ import "react-resizable/css/styles.css";
 import type { Connection, ConnectionStatus } from "./transport/types";
 import { WebSerialConnection, isWebSerialSupported } from "./transport/webSerial";
 import { SimulatorConnection } from "./transport/simulator";
+import { TauriSerialConnection, isTauri, listNativePorts } from "./transport/tauriSerial";
 import { liveStore } from "./telemetry/liveStore";
-import { saveFlight, listFlights, getFlight, deleteFlight, type FlightMeta } from "./telemetry/flightLog";
+import { saveFlight, listFlights, getFlight, deleteFlight, checkpointLiveFlight, clearLiveCheckpoint, recoverLiveFlight, type FlightMeta } from "./telemetry/flightLog";
 import { startAlarm, stopAlarm } from "./audio/masterCaution";
 import {
   getRocketConfig,
@@ -437,6 +438,17 @@ function MissionTimeline(props: {
 export default function App() {
   /** Transport */
   const [transportKind, setTransportKind] = useState<"simulator" | "serial">("simulator");
+  const [nativePorts, setNativePorts] = useState<string[]>([]);
+  const [nativePort, setNativePort] = useState("");
+  async function refreshNativePorts() {
+    try {
+      const ports = await listNativePorts();
+      setNativePorts(ports);
+      if (!nativePort && ports[0]) setNativePort(ports[0]);
+    } catch {
+      setNativePorts([]);
+    }
+  }
   const [baudRate, setBaudRate] = useState(115200);
   const [connStatus, setConnStatus] = useState<ConnectionStatus>("disconnected");
   const connectionRef = useRef<Connection | null>(null);
@@ -594,6 +606,30 @@ export default function App() {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  /** Crash-safe recording: checkpoint the live session every 5 s while
+      connected, and recover any orphaned checkpoint from a previous crash. */
+  const lastCheckpointCountRef = useRef(0);
+  useEffect(() => {
+    recoverLiveFlight()
+      .then((m) => {
+        if (m) pushAlert({ id: "recovered-flight", level: "info", title: "Flight recovered", detail: `${m.name} restored to the Flight Log after an unclean shutdown` });
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (connStatus !== "connected") return;
+    lastCheckpointCountRef.current = 0;
+    const t = window.setInterval(() => {
+      const lines = logLinesRef.current;
+      if (lines.length > lastCheckpointCountRef.current) {
+        lastCheckpointCountRef.current = lines.length;
+        checkpointLiveFlight(sessionStartRef.current, lines.slice()).catch(() => {});
+      }
+    }, 5000);
+    return () => window.clearInterval(t);
+  }, [connStatus]);
 
   const fg = useMemo(() => autoTextColor(theme.bgB), [theme.bgB]);
   const chipFg = useMemo(() => autoTextColor("#1b2339"), []); // stable
@@ -780,8 +816,8 @@ export default function App() {
   /** Transport actions */
   async function connect() {
     if (connStatus !== "disconnected") return;
-    if (transportKind === "serial" && !isWebSerialSupported()) {
-      window.alert("Web Serial API not supported in this browser. Use Chrome or Edge, or switch to Simulator.");
+    if (transportKind === "serial" && !isTauri() && !isWebSerialSupported()) {
+      window.alert("Web Serial API not supported in this browser. Use Chrome or Edge, the desktop app, or the Simulator.");
       return;
     }
 
@@ -797,7 +833,12 @@ export default function App() {
 
     liveStore.reset();
 
-    const conn: Connection = transportKind === "simulator" ? new SimulatorConnection() : new WebSerialConnection();
+    const conn: Connection =
+      transportKind === "simulator"
+        ? new SimulatorConnection()
+        : isTauri()
+          ? new TauriSerialConnection() // native serial in the desktop app
+          : new WebSerialConnection();
 
     const offLine = conn.onLine((line: string) => {
       logLinesRef.current.push(line);
@@ -831,7 +872,7 @@ export default function App() {
     };
 
     try {
-      await conn.connect({ baudRate });
+      await conn.connect({ baudRate, path: nativePort || undefined });
     } catch (err) {
       console.error("[connect] failed", err);
       connectionCleanupRef.current?.();
@@ -970,11 +1011,12 @@ export default function App() {
   /** Freeze toggle behavior */
   function toggleFreeze() {
     if (playback.mode === "playback") return;
-    if (!telemetry.frames.length) return;
+    if (!display.frames.length) return;
 
     if (!frozen) {
       setFrozen(true);
-      setFreezeIdx(telemetry.frames.length - 1);
+      // Index into the DISPLAYED (vehicle-filtered) frame set, not the raw buffer.
+      setFreezeIdx(display.frames.length - 1);
     } else {
       setFrozen(false);
       setFreezeIdx(null);
@@ -1032,6 +1074,7 @@ export default function App() {
     if (!raw.length) return;
     try {
       await saveFlight({ startedAt: sessionStartRef.current, rawLines: [...raw] });
+      await clearLiveCheckpoint().catch(() => {});
       await refreshFlights();
     } catch (e) {
       console.error("[flightLog] save failed", e);
@@ -1372,6 +1415,13 @@ ${trkpts}
   useEffect(() => {
     if (playback.mode === "playback") return;
 
+    // Only meaningful while actually connected — otherwise a parked ground
+    // station screams "link lost" forever (including at first app open).
+    if (connStatus !== "connected") {
+      for (const id of ["link-stale-crit", "link-stale-warn", "rssi-crit", "rssi-warn", "batt-crit", "batt-warn"]) clearAlert(id);
+      return;
+    }
+
     if (linkHealth.veryStale) {
       pushAlert({ id: "link-stale-crit", level: "crit", title: "Link lost / stale", detail: `No telemetry for ${Math.round(linkHealth.msSinceLine)} ms` });
     } else if (linkHealth.stale) {
@@ -1407,11 +1457,15 @@ ${trkpts}
         clearAlert("batt-warn");
       }
     }
-  }, [linkHealth, playback.mode, battProfile]);
+  }, [linkHealth, playback.mode, battProfile, connStatus]);
 
-  /** Custom alert rules engine (live only). */
+  /** Custom alert rules engine (live + connected only). */
   useEffect(() => {
     if (playback.mode === "playback") return;
+    if (connStatus !== "connected") {
+      for (const rule of alertRules) clearAlert(`rule-${rule.id}`);
+      return;
+    }
     const latest = telemetry.latest as Record<string, unknown> | undefined;
     for (const rule of alertRules) {
       const id = `rule-${rule.id}`;
@@ -1427,7 +1481,7 @@ ${trkpts}
         clearAlert(id);
       }
     }
-  }, [telemetry.latest, alertRules, playback.mode]);
+  }, [telemetry.latest, alertRules, playback.mode, connStatus]);
 
   const modeChip = playback.mode === "playback" ? `PLAYBACK${playback.filename ? `: ${playback.filename}` : ""}` : "LIVE";
 
@@ -2352,8 +2406,28 @@ ${trkpts}
             title="Transport"
           >
             <option value="simulator">Simulator</option>
-            <option value="serial">Serial{isWebSerialSupported() ? "" : " (unsupported browser)"}</option>
+            <option value="serial">Serial{isTauri() ? " (native)" : isWebSerialSupported() ? "" : " (unsupported browser)"}</option>
           </select>
+
+          {transportKind === "serial" && isTauri() && (
+            <>
+              <select
+                className="vx-select"
+                value={nativePort}
+                onChange={(e) => setNativePort(e.target.value)}
+                disabled={playback.mode === "playback" || connStatus !== "disconnected"}
+                title="Native serial port"
+              >
+                <option value="" disabled>{nativePorts.length ? "Select port…" : "No ports — Refresh"}</option>
+                {nativePorts.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+              <button className="vx-btn" onClick={refreshNativePorts} disabled={connStatus !== "disconnected"} title="Scan for serial ports">
+                Refresh
+              </button>
+            </>
+          )}
 
           {transportKind === "serial" && (
             <select
@@ -2384,6 +2458,11 @@ ${trkpts}
             Disconnect
           </button>
           <span className="vx-chip" title="Connection status">{connStatus.toUpperCase()}</span>
+          {connStatus === "connected" && (
+            <span className="vx-chip" title="Recording — session checkpointed to disk every 5 s" style={{ borderColor: "rgba(255,59,71,0.5)", color: "var(--vx-crit)" }}>
+              <span className="vx-live-dot">●</span> REC
+            </span>
+          )}
 
           {/* Quick Add */}
           <select
@@ -3732,6 +3811,45 @@ function AdvancedAddModal(props: {
 }
 
 /** ---------- WidgetFrame ---------- */
+function WidgetBody(props: {
+  widgetId: WidgetId;
+  latest: any;
+  telemetry: any;
+  unitSystem: UnitSystem;
+  view: "card" | "instrument" | "plot";
+}) {
+  return <>{renderWidget(props)}</>;
+}
+
+/** Isolates widget render crashes: one failing widget must never take down
+    the console mid-flight. Resets when the widget id or view changes. */
+class WidgetErrorBoundary extends React.Component<
+  { resetKey: string; children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  componentDidUpdate(prev: { resetKey: string }) {
+    if (prev.resetKey !== this.props.resetKey && this.state.error) this.setState({ error: null });
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ display: "grid", placeItems: "center", height: "100%", gap: 8, alignContent: "center", textAlign: "center", padding: 12 }}>
+          <div style={{ color: "var(--vx-crit)", fontWeight: 700, letterSpacing: "0.12em", fontSize: 12 }}>WIDGET FAULT — ISOLATED</div>
+          <div style={{ fontFamily: "var(--vx-font-mono)", fontSize: 11, color: "var(--vx-fg-dim)", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>
+            {String(this.state.error.message || this.state.error)}
+          </div>
+          <button className="vx-btn" onClick={() => this.setState({ error: null })}>Retry</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function WidgetFrame(props: {
   instKey: string;
   widgetId: WidgetId;
@@ -3808,7 +3926,10 @@ function WidgetFrame(props: {
     props.onPatchSettings({ vid: next as string | undefined });
   }
 
-  const body = renderWidget({ widgetId: props.widgetId, latest: effTelemetry.latest, telemetry: effTelemetry.telemetry, unitSystem, view });
+  // Deferred into a child component so the error boundary can catch renderer throws.
+  const body = (
+    <WidgetBody widgetId={props.widgetId} latest={effTelemetry.latest} telemetry={effTelemetry.telemetry} unitSystem={unitSystem} view={view} />
+  );
 
   const consoleFg = autoTextColor(props.theme.consoleBg);
 
@@ -3909,6 +4030,7 @@ function WidgetFrame(props: {
 
         {/* Body — definite height + size container so content scales with the widget */}
         <div className="vx-body" style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <WidgetErrorBoundary resetKey={`${props.widgetId}:${view}:${widgetVid ?? ""}`}>
           {props.widgetId === "raw.console" ? (
             <>
               <div
@@ -3961,6 +4083,7 @@ function WidgetFrame(props: {
           ) : (
             <div style={{ flex: 1, minHeight: 0, overflow: view === "instrument" ? "hidden" : "auto", display: "flex", flexDirection: "column" }}>{body}</div>
           )}
+          </WidgetErrorBoundary>
         </div>
       </div>
     </div>

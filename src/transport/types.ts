@@ -2,6 +2,8 @@ export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
 export type ConnectOptions = {
   baudRate: number;
+  /** Port path for transports that enumerate ports (native serial). */
+  path?: string;
 };
 
 export interface Connection {

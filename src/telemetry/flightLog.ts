@@ -105,12 +105,54 @@ export async function saveFlight(params: { name?: string; startedAt: number; raw
 export async function listFlights(): Promise<FlightMeta[]> {
   const all = await tx<FlightRecord[]>("readonly", (store) => store.getAll() as IDBRequest<FlightRecord[]>);
   return all
+    .filter((r) => r.id !== LIVE_ID)
     .map(({ rawLines, ...meta }) => meta)
     .sort((a, b) => b.savedAt - a.savedAt);
 }
 
 export async function getFlight(id: string): Promise<FlightRecord | undefined> {
   return tx<FlightRecord | undefined>("readonly", (store) => store.get(id) as IDBRequest<FlightRecord | undefined>);
+}
+
+/* ---------------- Crash-safe live checkpointing ----------------
+ * The in-progress session is checkpointed under a fixed id every few seconds
+ * while connected. A clean disconnect archives the flight and clears the
+ * checkpoint; a crash / closed tab leaves it behind, and the next launch
+ * recovers it into a normal flight-log entry. Flight data is never lost.
+ */
+
+const LIVE_ID = "__live_session__";
+
+export async function checkpointLiveFlight(startedAt: number, rawLines: string[]): Promise<void> {
+  const s = summarizeRawLines(rawLines);
+  const rec: FlightRecord = {
+    id: LIVE_ID,
+    name: `LIVE ${new Date(startedAt).toLocaleString()}`,
+    savedAt: Date.now(),
+    startedAt,
+    frameCount: s.frameCount,
+    rawCount: rawLines.length,
+    durationMs: s.durationMs,
+    apogeeM: s.apogeeM,
+    rawLines,
+  };
+  await tx("readwrite", (store) => store.put(rec));
+}
+
+export async function clearLiveCheckpoint(): Promise<void> {
+  await tx("readwrite", (store) => store.delete(LIVE_ID) as unknown as IDBRequest<undefined>);
+}
+
+/** Recover an orphaned checkpoint into a real flight entry. Returns its meta, or null. */
+export async function recoverLiveFlight(): Promise<FlightMeta | null> {
+  const rec = await tx<FlightRecord | undefined>("readonly", (store) => store.get(LIVE_ID) as IDBRequest<FlightRecord | undefined>);
+  if (!rec || !rec.rawLines?.length) return null;
+  await tx("readwrite", (store) => store.delete(LIVE_ID) as unknown as IDBRequest<undefined>);
+  return saveFlight({
+    name: `Recovered · ${new Date(rec.startedAt).toLocaleString()}`,
+    startedAt: rec.startedAt,
+    rawLines: rec.rawLines,
+  });
 }
 
 export async function deleteFlight(id: string): Promise<void> {
