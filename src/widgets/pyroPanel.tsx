@@ -72,7 +72,7 @@ function MasterBanner(props: { armed: boolean; drogue?: 0 | 1; main?: 0 | 1; has
         border: `1px solid ${col}`,
         borderLeftWidth: 4,
         borderRadius: 3,
-        background: "rgba(10,16,30,0.7)",
+        background: "rgba(20, 20, 23,0.7)",
         padding: "10px 14px",
         display: "flex",
         alignItems: "center",
@@ -97,7 +97,7 @@ function PyroChannel(props: { label: string; cont?: 0 | 1; armed: boolean; hasFl
 
   const col = stateColor(s);
   return (
-    <div style={{ border: "1px solid var(--vx-line)", borderRadius: 3, background: "rgba(10,16,30,0.5)", padding: 12, display: "grid", gap: 8 }}>
+    <div style={{ border: "1px solid var(--vx-line)", borderRadius: 3, background: "rgba(20, 20, 23,0.5)", padding: 12, display: "grid", gap: 8 }}>
       <span className="vx-label" style={{ fontSize: 10 }}>{props.label}</span>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span className="vx-dot" style={{ width: 12, height: 12, background: col, boxShadow: `0 0 10px ${col}` }} />

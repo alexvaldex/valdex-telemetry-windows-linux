@@ -25,7 +25,7 @@ class RootBoundary extends React.Component<{ children: React.ReactNode }, { erro
             </div>
             <button
               onClick={() => window.location.reload()}
-              style={{ padding: "12px 28px", fontSize: 14, fontWeight: 700, background: "rgba(31,157,255,0.2)", color: "#57c1ff", border: "1px solid rgba(31,157,255,0.5)", borderRadius: 4, cursor: "pointer", letterSpacing: "0.08em" }}
+              style={{ padding: "12px 28px", fontSize: 14, fontWeight: 700, background: "rgba(162, 166, 174,0.2)", color: "#d8dbe0", border: "1px solid rgba(162, 166, 174,0.5)", borderRadius: 4, cursor: "pointer", letterSpacing: "0.08em" }}
             >
               RESTART CONSOLE
             </button>

@@ -39,6 +39,15 @@ export type TelemetryFrameV1 = {
   pressure_pa?: number;
   humidity_pct?: number;
 
+  // Thrust vector control (Tier 3) — gimballed motor mount.
+  // Commanded angles are what the controller asked for; *_fb_* are the servo
+  // feedback/actual angles when the hardware reports them.
+  tvc_pitch_deg?: number;
+  tvc_yaw_deg?: number;
+  tvc_pitch_fb_deg?: number;
+  tvc_yaw_fb_deg?: number;
+  tvc_enabled?: 0 | 1;
+
   // Events / pyro / states (Tier 3)
   event?: string;
   pyro_main_cont?: 0 | 1;

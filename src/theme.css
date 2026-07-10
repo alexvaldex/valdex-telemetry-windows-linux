@@ -1,32 +1,39 @@
 /* ============================================================
    VX Telemetry — Mission Control design foundation
-   Dark, high-contrast, technical. SpaceX-launch-console feel.
+   Graphite/near-black, high-contrast, technical.
+   Palette is derived from the VX logo: #111112 field, #474747 mark.
    ============================================================ */
 
 @import url("https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap");
 
 :root {
-  /* Core palette */
-  --vx-bg0: #04060c;          /* deepest background */
-  --vx-bg1: #070b14;          /* shell background */
-  --vx-bg2: #0b1220;          /* panel background */
-  --vx-panel: rgba(10, 16, 30, 0.72);
-  --vx-panel-solid: #0a1020;
+  /* Core palette — sampled from the logo artwork */
+  --vx-bg0: #0a0a0b;          /* deepest background */
+  --vx-bg1: #111112;          /* logo field color — shell background */
+  --vx-bg2: #17171a;          /* panel background */
+  --vx-panel: rgba(20, 20, 23, 0.72);
+  --vx-panel-solid: #141416;
 
-  /* Lines / structure */
-  --vx-line: rgba(100, 150, 230, 0.16);
-  --vx-line-strong: rgba(120, 175, 255, 0.34);
-  --vx-grid: rgba(90, 140, 220, 0.06);
+  /* Brand grays straight off the mark */
+  --vx-mark: #474747;         /* the logo mark itself */
+  --vx-mark-lift: #5c5c5e;
+
+  /* Lines / structure — neutral, no blue cast */
+  --vx-line: rgba(168, 171, 177, 0.16);
+  --vx-line-strong: rgba(198, 201, 207, 0.32);
+  --vx-grid: rgba(150, 153, 160, 0.07);
 
   /* Text */
-  --vx-fg: #d9e3f7;
-  --vx-fg-dim: #7e8db0;
-  --vx-fg-faint: #4a5878;
+  --vx-fg: #e7e8ea;
+  --vx-fg-dim: #9a9ca3;
+  --vx-fg-faint: #62656c;
 
-  /* Signal colors */
-  --vx-blue: #1f9dff;
-  --vx-blue-bright: #57c1ff;
-  --vx-blue-glow: rgba(31, 157, 255, 0.35);
+  /* Accent — silver lifted off the logo mark. */
+  --vx-accent: #a2a6ae;
+  --vx-accent-bright: #d8dbe0;
+  --vx-accent-glow: rgba(162, 166, 174, 0.32);
+
+  /* Signal colors — semantic, deliberately NOT monochrome (safety) */
   --vx-go: #24e08a;
   --vx-go-glow: rgba(36, 224, 138, 0.35);
   --vx-caution: #ffb02e;
@@ -56,13 +63,12 @@ body,
 body {
   color: var(--vx-fg);
   font-family: var(--vx-font-display);
-  /* Layered starfield-ish deep-space backdrop. --vx-app-bg-top/bottom are set
-     from JS (App Background picker in Settings); these hex defaults are the
-     fallback when the user hasn't customized it. */
+  /* Neutral graphite backdrop. --vx-app-bg-top/bottom are set from JS (App
+     Background picker in Settings); these hex defaults match the logo field. */
   background:
-    radial-gradient(1200px 700px at 15% -10%, rgba(31, 157, 255, 0.08), transparent 60%),
-    radial-gradient(1000px 800px at 110% 10%, rgba(36, 224, 138, 0.05), transparent 55%),
-    linear-gradient(180deg, var(--vx-app-bg-top, #05070e) 0%, var(--vx-app-bg-bottom, #04060c) 100%);
+    radial-gradient(1200px 700px at 15% -10%, rgba(190, 193, 200, 0.045), transparent 60%),
+    radial-gradient(1000px 800px at 110% 10%, rgba(150, 153, 160, 0.03), transparent 55%),
+    linear-gradient(180deg, var(--vx-app-bg-top, #111112) 0%, var(--vx-app-bg-bottom, #0a0a0b) 100%);
   background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -109,13 +115,13 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(120, 175, 255, 0.18);
+  background: rgba(190, 193, 200, 0.18);
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(120, 175, 255, 0.3);
+  background: rgba(200, 203, 210, 0.3);
   background-clip: padding-box;
 }
 
@@ -142,20 +148,20 @@ body {
 :root.vx-field {
   --vx-bg0: #000000;
   --vx-bg1: #000000;
-  --vx-bg2: #05070c;
+  --vx-bg2: #08080a;
   --vx-panel: rgba(0, 0, 0, 0.85);
   --vx-panel-solid: #000000;
 
-  --vx-line: rgba(160, 195, 255, 0.4);
-  --vx-line-strong: rgba(190, 215, 255, 0.7);
+  --vx-line: rgba(210, 213, 219, 0.42);
+  --vx-line-strong: rgba(235, 238, 243, 0.72);
   --vx-grid: transparent;
 
   --vx-fg: #ffffff;
-  --vx-fg-dim: #d6e0f5;
-  --vx-fg-faint: #9aa9c9;
+  --vx-fg-dim: #dcdee3;
+  --vx-fg-faint: #a4a7ae;
 
-  --vx-blue: #40b4ff;
-  --vx-blue-bright: #7fd4ff;
+  --vx-accent: #c9ccd2;
+  --vx-accent-bright: #ffffff;
   --vx-go: #3dffa0;
   --vx-caution: #ffc23d;
   --vx-crit: #ff5560;

@@ -162,8 +162,8 @@ export function FlightSummaryWidget(props: { frames: TelemetryFrameV1[]; unitSys
       <Row k="APOGEE" v={num(conv(s.apogeeM), 0, altU)} accent="var(--vx-go)" big />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 16px", alignContent: "start" }}>
-        <Row k="MAX VELOCITY" v={num(conv(s.maxVelMps), 0, velU)} accent="var(--vx-blue-bright)" />
-        <Row k="MAX ACCEL" v={num(s.maxAccelG, 1, "g")} accent="var(--vx-blue-bright)" />
+        <Row k="MAX VELOCITY" v={num(conv(s.maxVelMps), 0, velU)} accent="var(--vx-accent-bright)" />
+        <Row k="MAX ACCEL" v={num(s.maxAccelG, 1, "g")} accent="var(--vx-accent-bright)" />
         <Row k="BOOST" v={num(s.boostS, 2, "s")} />
         <Row k="COAST" v={num(s.coastS, 2, "s")} />
         <Row k="DESCENT" v={num(s.descentS, 1, "s")} />

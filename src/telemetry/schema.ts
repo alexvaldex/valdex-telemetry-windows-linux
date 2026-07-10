@@ -113,6 +113,14 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
 
   const humidity_pct = num(pick(raw, ["humidity_pct", "humidity", "rh", "hum"]));
 
+  // Thrust vector control — commanded gimbal angles + optional servo feedback
+  const tvc_pitch_deg = num(pick(raw, ["tvc_pitch_deg", "tvc_pitch", "gimbal_pitch_deg", "gimbal_pitch", "servo_pitch"]));
+  const tvc_yaw_deg = num(pick(raw, ["tvc_yaw_deg", "tvc_yaw", "gimbal_yaw_deg", "gimbal_yaw", "servo_yaw"]));
+  const tvc_pitch_fb_deg = num(pick(raw, ["tvc_pitch_fb_deg", "tvc_pitch_fb", "gimbal_pitch_fb", "servo_pitch_fb"]));
+  const tvc_yaw_fb_deg = num(pick(raw, ["tvc_yaw_fb_deg", "tvc_yaw_fb", "gimbal_yaw_fb", "servo_yaw_fb"]));
+  const tvcEnRaw = pick(raw, ["tvc_enabled", "tvc_en", "gimbal_enabled"]);
+  const tvc_enabled = tvcEnRaw === 0 || tvcEnRaw === 1 ? (tvcEnRaw as 0 | 1) : undefined;
+
   // Events / continuity
   const event = typeof raw.event === "string" ? raw.event : (typeof raw.ev === "string" ? raw.ev : undefined);
   const pyro_main_cont = raw.pyro_main_cont === 0 || raw.pyro_main_cont === 1 ? raw.pyro_main_cont : undefined;
@@ -136,6 +144,11 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
     gps_sats,
     gps_alt_m,
     q_w, q_x, q_y, q_z,
+    tvc_pitch_deg,
+    tvc_yaw_deg,
+    tvc_pitch_fb_deg,
+    tvc_yaw_fb_deg,
+    tvc_enabled,
     temp_c,
     pressure_pa,
     humidity_pct,

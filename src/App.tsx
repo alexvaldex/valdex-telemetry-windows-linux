@@ -3,6 +3,8 @@ import GridLayout, { type Layout } from "react-grid-layout";
 
 import { deriveCapabilities } from "./telemetry/capabilities";
 import type { TelemetryFrameV1 } from "./telemetry/types";
+import { getPadOrigin } from "./telemetry/padOrigin";
+import { tiltDegFromQuat } from "./telemetry/attitude";
 
 import { WIDGETS, WIDGETS_BY_CATEGORY, type WidgetId } from "./widgets/registry";
 import type { UnitSystem } from "./units";
@@ -91,14 +93,15 @@ type ThemeSettings = {
 };
 
 
-/** ---------- Defaults / presets ---------- */
-const DEFAULT_THEME: ThemeSettings = { bgA: "#060b16", bgB: "#04070e", consoleBg: "#03060d" };
+/** ---------- Defaults / presets ----------
+ * Palette is sampled from the VX logo: #111112 field, #474747 mark. */
+const DEFAULT_THEME: ThemeSettings = { bgA: "#16161a", bgB: "#0d0d0f", consoleBg: "#0b0b0d", appBg: "#111112" };
 
 const THEME_PRESETS: Array<{ name: string; theme: ThemeSettings }> = [
-  { name: "Mission Control", theme: { bgA: "#060b16", bgB: "#04070e", consoleBg: "#03060d" } },
-  { name: "Deep Space", theme: { bgA: "#050814", bgB: "#070b1b", consoleBg: "#050a16" } },
-  { name: "Range Night", theme: { bgA: "#0a0f0c", bgB: "#05090a", consoleBg: "#040807" } },
-  { name: "Graphite", theme: { bgA: "#0d0f14", bgB: "#090b10", consoleBg: "#0a0d13" } },
+  { name: "Graphite", theme: { bgA: "#16161a", bgB: "#0d0d0f", consoleBg: "#0b0b0d", appBg: "#111112" } },
+  { name: "Carbon", theme: { bgA: "#1c1c1f", bgB: "#141416", consoleBg: "#101012", appBg: "#17171a" } },
+  { name: "Ink", theme: { bgA: "#0b0b0c", bgB: "#050506", consoleBg: "#000000", appBg: "#0a0a0b" } },
+  { name: "Slate", theme: { bgA: "#191b1e", bgB: "#101114", consoleBg: "#0d0e10", appBg: "#141518" } },
 ];
 
 /** ---------- Battery tables (per-cell) ---------- */
@@ -375,29 +378,81 @@ function MissionLogo() {
   );
 }
 
-function MissionTimeline(props: {
+/**
+ * Mission Model — a live launch-profile view.
+ *
+ * Replaces the old flat timeline strip. The vehicle is drawn rising from the
+ * pad coordinates (the GPS origin latched at first fix, or the Sim Setup pad),
+ * positioned by real telemetry: altitude on the vertical axis, GPS downrange
+ * distance on the horizontal, body tilt from the attitude quaternion.
+ *
+ * Deliberately SVG rather than three.js: this panel is always on screen, and
+ * the 3D CAD viewer is a ~950 KB lazy chunk. A vertical-profile projection also
+ * reads better than a perspective camera for judging a trajectory.
+ *
+ * The event rail underneath is kept — it's still how you jump to an event.
+ */
+function MissionModel(props: {
   events: DerivedEvent[];
+  frames: TelemetryFrameV1[];
+  latest?: TelemetryFrameV1;
   currentTms: number;
+  phase: string;
   onJump: (id: DerivedEvent["id"]) => void;
 }) {
-  const { events } = props;
+  const { events, frames, latest } = props;
   const t0base = events.find((e) => e.id === "LIFTOFF")?.t_ms;
 
-  if (!events.length) {
-    return (
-      <div className="vx-timeline">
-        <div className="vx-label" style={{ position: "absolute", top: 8, left: 16 }}>Mission Timeline</div>
-        <div style={{ textAlign: "center", color: "var(--vx-fg-faint)", fontSize: 12, letterSpacing: "0.14em" }}>AWAITING LIFTOFF</div>
-      </div>
-    );
+  const pad = getPadOrigin();
+
+  /** Local-tangent-plane offset (meters east/north) of a fix from the pad. */
+  const offsetM = (lat: number, lon: number) => {
+    if (!pad) return { e: 0, n: 0 };
+    const mPerDegLat = 111_320;
+    return {
+      e: (lon - pad.lon) * mPerDegLat * Math.cos((pad.lat * Math.PI) / 180),
+      n: (lat - pad.lat) * mPerDegLat,
+    };
+  };
+
+  /** Trajectory in (downrange, altitude) meters. Downrange is signed by the
+      east component so the vehicle visibly leans the way the wind pushes it. */
+  const track = frames
+    .filter((f) => typeof f.alt_m === "number")
+    .map((f) => {
+      let downrange = 0;
+      if (pad && typeof f.lat === "number" && typeof f.lon === "number") {
+        const { e, n } = offsetM(f.lat, f.lon);
+        downrange = Math.sign(e || 1) * Math.hypot(e, n);
+      }
+      return { x: downrange, y: f.alt_m as number, t: f.t_ms };
+    });
+
+  const altM = typeof latest?.alt_m === "number" ? latest.alt_m : 0;
+  const tilt = tiltDegFromQuat(latest?.q_w, latest?.q_x, latest?.q_y, latest?.q_z);
+
+  let downrangeM = 0;
+  if (pad && typeof latest?.lat === "number" && typeof latest?.lon === "number") {
+    const { e, n } = offsetM(latest.lat, latest.lon);
+    downrangeM = Math.hypot(e, n);
   }
 
-  const ts = events.map((e) => e.t_ms);
-  const tStart = Math.min(...ts, props.currentTms);
-  const tEnd = Math.max(...ts, props.currentTms);
-  const span = tEnd - tStart || 1;
-  const pos = (t: number) => Math.max(0, Math.min(100, ((t - tStart) / span) * 100));
-  const nowPct = pos(props.currentTms);
+  // Auto-fit: keep the pad on screen and give the vehicle headroom.
+  const maxAlt = Math.max(100, ...track.map((p) => p.y));
+  const maxAbsX = Math.max(60, ...track.map((p) => Math.abs(p.x)));
+  const VB_W = 1000;
+  const VB_H = 260;
+  const GROUND_Y = VB_H - 34;
+  const TOP_Y = 18;
+
+  const sx = (xm: number) => VB_W / 2 + (xm / (maxAbsX * 1.25)) * (VB_W / 2 - 40);
+  const sy = (ym: number) => GROUND_Y - (ym / (maxAlt * 1.15)) * (GROUND_Y - TOP_Y);
+
+  const poly = track.map((p) => `${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ");
+  const cur = { x: sx(track.length ? track[track.length - 1].x : 0), y: sy(altM) };
+
+  // The rocket leans by its actual tilt, away from the pad.
+  const leanDeg = tilt !== null ? Math.max(-60, Math.min(60, tilt)) * (downrangeM >= 0 ? 1 : -1) : 0;
 
   const relLabel = (t: number) => {
     if (t0base === undefined) return "";
@@ -405,31 +460,86 @@ function MissionTimeline(props: {
     return `T${s >= 0 ? "+" : "−"}${Math.abs(s).toFixed(0)}s`;
   };
 
+  const apogee = events.find((e) => e.id === "APOGEE");
+  const apogeePt = apogee ? track.find((p) => p.t >= apogee.t_ms) : undefined;
+
   return (
-    <div className="vx-timeline">
-      <div className="vx-label" style={{ position: "absolute", top: 8, left: 16 }}>Mission Timeline</div>
-      <div className="vx-timeline-rail">
-        <div className="vx-timeline-fill" style={{ width: `${nowPct}%` }} />
-        <div className="vx-timeline-now" style={{ left: `${nowPct}%` }} />
-        {events.map((e, i) => {
-          const reached = e.t_ms <= props.currentTms;
-          const above = i % 2 === 0;
-          return (
-            <button
-              key={e.id}
-              className={`vx-tl-event ${reached ? "reached" : ""}`}
-              style={{ left: `${pos(e.t_ms)}%`, top: -4 }}
-              onClick={() => props.onJump(e.id)}
-              title={`${e.label} — jump to event`}
-            >
-              <span className="vx-tl-tick" />
-              <span className={`vx-tl-lbl ${above ? "above" : "below"}`}>
-                {e.id} <span className="vx-tl-time">{relLabel(e.t_ms)}</span>
-              </span>
-            </button>
-          );
-        })}
+    <div className="vx-model">
+      <div className="vx-model-head">
+        <div className="vx-label">Mission Model</div>
+        <div className="vx-model-stats">
+          <ModelStat label="ALT" value={`${altM.toFixed(0)} m`} />
+          <ModelStat label="DOWNRANGE" value={pad ? `${downrangeM.toFixed(0)} m` : "—"} />
+          <ModelStat label="TILT" value={tilt !== null ? `${tilt.toFixed(1)}°` : "—"} />
+          <ModelStat label="PHASE" value={props.phase} />
+        </div>
       </div>
+
+      <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="vx-model-svg" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Live launch profile">
+        <line x1="0" y1={GROUND_Y} x2={VB_W} y2={GROUND_Y} stroke="var(--vx-line-strong)" strokeWidth="1" />
+        <line x1={VB_W / 2} y1={TOP_Y} x2={VB_W / 2} y2={GROUND_Y} stroke="var(--vx-line)" strokeWidth="0.6" strokeDasharray="3 5" />
+
+        {[0.25, 0.5, 0.75, 1].map((f) => (
+          <g key={f}>
+            <line x1="0" y1={sy(maxAlt * f)} x2={VB_W} y2={sy(maxAlt * f)} stroke="var(--vx-grid)" strokeWidth="0.6" />
+            <text x="6" y={sy(maxAlt * f) - 3} fontSize="9" fill="var(--vx-fg-faint)" fontFamily="var(--vx-font-mono)">
+              {Math.round(maxAlt * f)} m
+            </text>
+          </g>
+        ))}
+
+        {/* Pad */}
+        <rect x={VB_W / 2 - 12} y={GROUND_Y - 3} width="24" height="3" fill="var(--vx-mark-lift)" />
+        <text x={VB_W / 2} y={GROUND_Y + 14} fontSize="9" textAnchor="middle" fill="var(--vx-fg-faint)" fontFamily="var(--vx-font-mono)">
+          {pad ? `${pad.lat.toFixed(5)}, ${pad.lon.toFixed(5)}` : "PAD — awaiting GPS fix"}
+        </text>
+
+        {track.length > 1 && <polyline points={poly} fill="none" stroke="var(--vx-accent)" strokeWidth="1.4" opacity="0.75" />}
+
+        {apogeePt && (
+          <g>
+            <circle cx={sx(apogeePt.x)} cy={sy(apogeePt.y)} r="3" fill="none" stroke="var(--vx-caution)" strokeWidth="1.2" />
+            <text x={sx(apogeePt.x) + 7} y={sy(apogeePt.y) - 5} fontSize="9" fill="var(--vx-caution)" fontFamily="var(--vx-font-mono)">
+              APOGEE {apogeePt.y.toFixed(0)} m
+            </text>
+          </g>
+        )}
+
+        {/* Vehicle — leans by its measured tilt */}
+        <g transform={`translate(${cur.x} ${cur.y}) rotate(${leanDeg})`}>
+          <polygon points="0,-11 3.4,-3 3.4,7 -3.4,7 -3.4,-3" fill="var(--vx-accent-bright)" />
+          <polygon points="-3.4,7 -6.6,11 -3.4,2" fill="var(--vx-mark-lift)" />
+          <polygon points="3.4,7 6.6,11 3.4,2" fill="var(--vx-mark-lift)" />
+          {props.phase === "BOOST" && <polygon points="-2.4,8 2.4,8 0,19" fill="var(--vx-caution)" opacity="0.9" />}
+        </g>
+      </svg>
+
+      {events.length > 0 && (
+        <div className="vx-model-rail">
+          {events.map((e) => {
+            const reached = e.t_ms <= props.currentTms;
+            return (
+              <button
+                key={e.id}
+                className={`vx-model-ev ${reached ? "reached" : ""}`}
+                onClick={() => props.onJump(e.id)}
+                title={`${e.label} — jump to event`}
+              >
+                {e.id} <span className="vx-model-ev-t">{relLabel(e.t_ms)}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModelStat(props: { label: string; value: string }) {
+  return (
+    <div className="vx-model-stat">
+      <span className="vx-label" style={{ fontSize: 9 }}>{props.label}</span>
+      <span className="vx-num" style={{ fontSize: 13, color: "var(--vx-fg)" }}>{props.value}</span>
     </div>
   );
 }
@@ -794,6 +904,9 @@ export default function App() {
 
   /** Settings modal */
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  /** Export modal — one entry point, asks which file format to write. */
+  const [exportOpen, setExportOpen] = useState(false);
 
   /** Flight log */
   const [flightLogOpen, setFlightLogOpen] = useState(false);
@@ -1922,7 +2035,7 @@ ${trkpts}
 
         .vx-shell {
           background:
-            linear-gradient(180deg, rgba(31,157,255,0.03), transparent 240px),
+            linear-gradient(180deg, rgba(162, 166, 174,0.03), transparent 240px),
             linear-gradient(135deg, var(--vx-bgA), var(--vx-bgB));
           border-radius: 4px;
           padding: 12px;
@@ -1973,7 +2086,7 @@ ${trkpts}
           width: 30px; height: 30px;
           border-radius: 3px;
           border: 1px solid var(--vx-line);
-          background: rgba(120,175,255,0.05);
+          background: rgba(198, 201, 207,0.05);
           color: var(--vx-fg);
           cursor: pointer;
           transition: all 0.12s ease;
@@ -1981,7 +2094,7 @@ ${trkpts}
         .vx-xbtn:hover:not(:disabled) { border-color: var(--vx-crit); color: var(--vx-crit); background: rgba(255,59,71,0.1); }
 
         .vx-select {
-          background: rgba(10,16,30,0.85);
+          background: rgba(20, 20, 23,0.85);
           color: var(--vx-fg);
           border: 1px solid var(--vx-line);
           border-radius: 3px;
@@ -1993,13 +2106,13 @@ ${trkpts}
           transition: border-color 0.12s ease;
         }
         .vx-select:hover { border-color: var(--vx-line-strong); }
-        .vx-select:focus { border-color: var(--vx-blue); box-shadow: 0 0 0 2px var(--vx-blue-glow); }
+        .vx-select:focus { border-color: var(--vx-accent); box-shadow: 0 0 0 2px var(--vx-accent-glow); }
 
         .vx-btn {
           padding: 8px 12px;
           border-radius: 3px;
           border: 1px solid var(--vx-line);
-          background: rgba(120,175,255,0.05);
+          background: rgba(198, 201, 207,0.05);
           color: var(--vx-fg);
           cursor: pointer;
           font-family: var(--vx-font-display);
@@ -2009,13 +2122,13 @@ ${trkpts}
           letter-spacing: 0.08em;
           transition: all 0.12s ease;
         }
-        .vx-btn:hover:not(:disabled) { background: rgba(120,175,255,0.12); border-color: var(--vx-line-strong); }
+        .vx-btn:hover:not(:disabled) { background: rgba(198, 201, 207,0.12); border-color: var(--vx-line-strong); }
         .vx-btn-primary {
-          background: rgba(31,157,255,0.16);
-          border-color: rgba(31,157,255,0.5);
-          color: var(--vx-blue-bright);
+          background: rgba(162, 166, 174,0.16);
+          border-color: rgba(162, 166, 174,0.5);
+          color: var(--vx-accent-bright);
         }
-        .vx-btn-primary:hover:not(:disabled) { background: rgba(31,157,255,0.28); box-shadow: 0 0 14px var(--vx-blue-glow); }
+        .vx-btn-primary:hover:not(:disabled) { background: rgba(162, 166, 174,0.28); box-shadow: 0 0 14px var(--vx-accent-glow); }
         .vx-btn-danger { background: rgba(255,59,71,0.14); border-color: rgba(255,59,71,0.45); color: #ff8b92; }
         .vx-btn-danger:hover:not(:disabled) { background: rgba(255,59,71,0.24); }
         .vx-btn:disabled { opacity: 0.32; cursor: not-allowed; }
@@ -2027,7 +2140,7 @@ ${trkpts}
           padding: 4px 9px;
           border-radius: 3px;
           border: 1px solid var(--vx-line);
-          background: rgba(10,16,30,0.6);
+          background: rgba(20, 20, 23,0.6);
           font-family: var(--vx-font-mono);
           font-variant-numeric: tabular-nums;
           font-size: 12px;
@@ -2050,14 +2163,14 @@ ${trkpts}
           position: absolute;
           right: 0; bottom: 0;
           width: 12px; height: 12px;
-          border-right: 2px solid var(--vx-blue);
-          border-bottom: 2px solid var(--vx-blue);
+          border-right: 2px solid var(--vx-accent);
+          border-bottom: 2px solid var(--vx-accent);
         }
 
         .vx-menu {
           position: fixed;
           min-width: 250px;
-          background: rgba(7,11,22,0.97);
+          background: rgba(17, 17, 18,0.97);
           border: 1px solid var(--vx-line-strong);
           border-radius: 4px;
           box-shadow: 0 18px 50px rgba(0,0,0,0.7);
@@ -2076,12 +2189,12 @@ ${trkpts}
           gap: 10px;
           font-size: 13px;
         }
-        .vx-menu-item:hover { background: rgba(31,157,255,0.12); }
+        .vx-menu-item:hover { background: rgba(162, 166, 174,0.12); }
         .vx-menu-muted { opacity: 0.6; font-size: 12px; }
 
         .vx-modal-backdrop {
           position: fixed; inset: 0;
-          background: rgba(2,4,9,0.78);
+          background: rgba(6, 6, 7,0.78);
           display: flex;
           align-items: center;
           justify-content: center;
@@ -2091,7 +2204,7 @@ ${trkpts}
         .vx-modal {
           width: min(1100px, 92vw);
           height: min(720px, 86vh);
-          background: rgba(7,11,22,0.98);
+          background: rgba(17, 17, 18,0.98);
           border: 1px solid var(--vx-line-strong);
           border-radius: 4px;
           box-shadow: 0 22px 70px rgba(0,0,0,0.75);
@@ -2104,27 +2217,127 @@ ${trkpts}
         .vx-pane { padding: 16px; border-right: 1px solid var(--vx-line); overflow: auto; }
         .vx-pane:last-child { border-right: none; }
 
+        /* ---- Settings / Export: single-column, tabbed, scrollable ---- */
+        .vx-modal.vx-settings, .vx-modal.vx-export {
+          display: flex;
+          flex-direction: column;
+          grid-template-columns: none;
+        }
+        .vx-modal.vx-settings { width: min(640px, 94vw); height: min(760px, 88vh); }
+        .vx-modal.vx-export { width: min(560px, 94vw); height: auto; max-height: 86vh; }
+
+        .vx-settings-head {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 16px 18px; border-bottom: 1px solid var(--vx-line); flex: 0 0 auto;
+        }
+        .vx-settings-tabs {
+          display: flex; gap: 2px; padding: 0 12px;
+          border-bottom: 1px solid var(--vx-line); flex: 0 0 auto;
+        }
+        .vx-tab {
+          appearance: none; background: none; border: none;
+          border-bottom: 2px solid transparent;
+          color: var(--vx-fg-dim); cursor: pointer;
+          padding: 12px 16px; font-family: var(--vx-font-display);
+          font-size: 12px; font-weight: 600;
+          letter-spacing: 0.14em; text-transform: uppercase;
+        }
+        .vx-tab:hover { color: var(--vx-fg); }
+        .vx-tab.active { color: var(--vx-accent-bright); border-bottom-color: var(--vx-accent); }
+
+        .vx-settings-body {
+          flex: 1 1 auto; overflow: auto; padding: 16px 18px;
+          display: flex; flex-direction: column; gap: 14px;
+        }
+        .vx-settings-foot {
+          flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 10px;
+          padding: 14px 18px; border-top: 1px solid var(--vx-line);
+        }
+        .vx-card-title {
+          font-family: var(--vx-font-display); font-size: 11px; font-weight: 600;
+          letter-spacing: 0.14em; text-transform: uppercase;
+          color: var(--vx-fg-dim); margin-bottom: 8px;
+        }
+        .vx-help { font-size: 12px; color: var(--vx-fg-faint); line-height: 1.6; }
+        .vx-preset-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+        .vx-color-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .vx-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+        .vx-row {
+          display: flex; align-items: center; justify-content: space-between; gap: 16px;
+          padding: 10px 0; border-bottom: 1px solid var(--vx-line);
+        }
+        .vx-row:last-child { border-bottom: none; padding-bottom: 0; }
+        .vx-row-label { font-size: 13px; color: var(--vx-fg); font-weight: 500; }
+
+        .vx-switch {
+          position: relative; flex: 0 0 auto;
+          width: 42px; height: 22px; border-radius: 11px;
+          border: 1px solid var(--vx-line-strong);
+          background: rgba(20, 20, 23, 0.9);
+          cursor: pointer; padding: 0; transition: background 0.15s, border-color 0.15s;
+        }
+        .vx-switch.on { background: var(--vx-accent); border-color: var(--vx-accent-bright); }
+        .vx-switch-knob {
+          position: absolute; top: 2px; left: 2px;
+          width: 16px; height: 16px; border-radius: 50%;
+          background: var(--vx-fg-dim); transition: transform 0.15s, background 0.15s;
+        }
+        .vx-switch.on .vx-switch-knob { transform: translateX(20px); background: #111112; }
+
+        .vx-kbd-list { display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
+        .vx-kbd-list > div { display: flex; align-items: center; gap: 12px; }
+        .vx-kbd-list code { min-width: 108px; text-align: center; }
+        .vx-kbd-list span { color: var(--vx-fg-dim); }
+
+        .vx-export-list { display: flex; flex-direction: column; gap: 8px; }
+        .vx-export-opt {
+          display: flex; align-items: flex-start; gap: 12px; text-align: left;
+          padding: 12px; border-radius: 3px; cursor: pointer;
+          border: 1px solid var(--vx-line);
+          background: rgba(20, 20, 23, 0.5);
+          color: var(--vx-fg); font-family: var(--vx-font-display);
+        }
+        .vx-export-opt:hover:not(:disabled) { border-color: var(--vx-line-strong); }
+        .vx-export-opt.active { border-color: var(--vx-accent); background: rgba(162, 166, 174, 0.1); }
+        .vx-export-opt:disabled { opacity: 0.4; cursor: not-allowed; }
+        .vx-export-radio {
+          flex: 0 0 auto; margin-top: 3px;
+          width: 13px; height: 13px; border-radius: 50%;
+          border: 1px solid var(--vx-line-strong);
+        }
+        .vx-export-opt.active .vx-export-radio {
+          border-color: var(--vx-accent-bright);
+          box-shadow: inset 0 0 0 3px var(--vx-accent);
+        }
+        .vx-export-name { display: block; font-size: 13px; font-weight: 600; }
+        .vx-export-ext {
+          font-family: var(--vx-font-mono); font-size: 11px;
+          color: var(--vx-fg-dim); margin-left: 6px;
+        }
+        .vx-export-desc { display: block; font-size: 12px; color: var(--vx-fg-faint); margin-top: 3px; }
+
         .vx-input {
           width: 100%;
           padding: 10px 10px;
           border-radius: 3px;
           border: 1px solid var(--vx-line);
-          background: rgba(10,16,30,0.7);
+          background: rgba(20, 20, 23,0.7);
           color: var(--vx-fg);
           outline: none;
           box-sizing: border-box;
           font-family: var(--vx-font-mono);
         }
-        .vx-input:focus { border-color: var(--vx-blue); box-shadow: 0 0 0 2px var(--vx-blue-glow); }
+        .vx-input:focus { border-color: var(--vx-accent); box-shadow: 0 0 0 2px var(--vx-accent-glow); }
         .vx-card {
           border: 1px solid var(--vx-line);
-          background: rgba(10,16,30,0.5);
+          background: rgba(20, 20, 23,0.5);
           border-radius: 4px;
           padding: 12px;
         }
         code {
-          background: rgba(31,157,255,0.1);
-          color: var(--vx-blue-bright);
+          background: rgba(162, 166, 174,0.1);
+          color: var(--vx-accent-bright);
           padding: 1px 5px;
           border-radius: 3px;
           font-family: var(--vx-font-mono);
@@ -2140,11 +2353,11 @@ ${trkpts}
           justify-content: space-between;
           align-items: center;
           gap: 10px;
-          background: rgba(10,16,30,0.85);
+          background: rgba(20, 20, 23,0.85);
           color: var(--vx-fg);
         }
         .vx-alert .vx-alert-title { text-transform: uppercase; letter-spacing: 0.1em; font-weight: 700; font-size: 13px; }
-        .vx-alert.info { border-color: var(--vx-blue); }
+        .vx-alert.info { border-color: var(--vx-accent); }
         .vx-alert.warn { border-color: var(--vx-caution); }
         .vx-alert.crit { border-color: var(--vx-crit); box-shadow: inset 0 0 30px rgba(255,59,71,0.12); }
 
@@ -2159,7 +2372,7 @@ ${trkpts}
           margin-bottom: 12px;
           padding: 8px 10px;
           border: 1px solid var(--vx-line);
-          background: rgba(10,16,30,0.4);
+          background: rgba(20, 20, 23,0.4);
           border-radius: 4px;
         }
         .vx-toolbar-left, .vx-toolbar-right {
@@ -2179,7 +2392,7 @@ ${trkpts}
         }
         .vx-hdr-panel {
           border: 1px solid var(--vx-line);
-          background: linear-gradient(180deg, rgba(31,157,255,0.05), rgba(10,16,30,0.5));
+          background: linear-gradient(180deg, rgba(162, 166, 174,0.05), rgba(20, 20, 23,0.5));
           border-radius: 4px;
           padding: 10px 14px;
           display: flex;
@@ -2199,7 +2412,7 @@ ${trkpts}
           color: var(--vx-fg);
           line-height: 1;
         }
-        .vx-brand-mark b { color: var(--vx-blue-bright); }
+        .vx-brand-mark b { color: var(--vx-accent-bright); }
         .vx-brand-sub {
           font-size: 10px;
           letter-spacing: 0.28em;
@@ -2245,9 +2458,9 @@ ${trkpts}
         .vx-phase-step.done { color: var(--vx-fg-dim); border-color: var(--vx-line); }
         .vx-phase-step.active {
           color: var(--vx-bg0);
-          background: var(--vx-blue);
-          border-color: var(--vx-blue-bright);
-          box-shadow: 0 0 14px var(--vx-blue-glow);
+          background: var(--vx-accent);
+          border-color: var(--vx-accent-bright);
+          box-shadow: 0 0 14px var(--vx-accent-glow);
           font-weight: 700;
         }
 
@@ -2263,7 +2476,7 @@ ${trkpts}
           border-radius: 3px;
           padding: 6px 10px;
           min-width: 74px;
-          background: rgba(10,16,30,0.5);
+          background: rgba(20, 20, 23,0.5);
           display: flex;
           flex-direction: column;
           gap: 3px;
@@ -2293,7 +2506,7 @@ ${trkpts}
           background: var(--vx-line);
         }
         .vx-readout {
-          background: rgba(8,13,24,0.9);
+          background: rgba(20, 20, 23,0.9);
           padding: 8px 14px;
           display: flex;
           flex-direction: column;
@@ -2310,7 +2523,7 @@ ${trkpts}
           color: var(--vx-fg);
         }
         .vx-readout .v small { font-size: 11px; color: var(--vx-fg-dim); font-weight: 500; margin-left: 3px; }
-        .vx-readout.peak .v { color: var(--vx-blue-bright); }
+        .vx-readout.peak .v { color: var(--vx-accent-bright); }
 
         /* ---------- Widget chrome ---------- */
         .vx-seg {
@@ -2320,7 +2533,7 @@ ${trkpts}
           overflow: hidden;
         }
         .vx-seg button {
-          background: rgba(10,16,30,0.6);
+          background: rgba(20, 20, 23,0.6);
           border: none;
           border-right: 1px solid var(--vx-line);
           color: var(--vx-fg-dim);
@@ -2333,10 +2546,10 @@ ${trkpts}
           transition: all 0.12s ease;
         }
         .vx-seg button:last-child { border-right: none; }
-        .vx-seg button:hover { color: var(--vx-fg); background: rgba(31,157,255,0.1); }
+        .vx-seg button:hover { color: var(--vx-fg); background: rgba(162, 166, 174,0.1); }
         .vx-seg button.on {
-          background: rgba(31,157,255,0.25);
-          color: var(--vx-blue-bright);
+          background: rgba(162, 166, 174,0.25);
+          color: var(--vx-accent-bright);
         }
 
         .vx-tbtn {
@@ -2344,7 +2557,7 @@ ${trkpts}
           padding: 0 6px;
           border-radius: 3px;
           border: 1px solid var(--vx-line);
-          background: rgba(10,16,30,0.6);
+          background: rgba(20, 20, 23,0.6);
           color: var(--vx-fg-dim);
           font-family: var(--vx-font-display);
           font-size: 10px;
@@ -2388,60 +2601,45 @@ ${trkpts}
         .vx-caution-banner .det { font-family: var(--vx-font-mono); font-size: 12px; color: #ffb3b8; }
 
         /* ---------- Mission timeline ---------- */
-        .vx-timeline {
-          position: relative;
+        /* ---- Mission Model: live launch profile ---- */
+        .vx-model {
           margin-bottom: 12px;
-          padding: 26px 16px 24px;
+          padding: 12px 14px 10px;
           border: 1px solid var(--vx-line);
           border-radius: 4px;
-          background: rgba(10,16,30,0.4);
+          background: rgba(20, 20, 23, 0.4);
         }
-        .vx-timeline-rail {
-          position: relative;
-          height: 2px;
-          background: var(--vx-line-strong);
-          margin: 0 6px;
+        .vx-model-head {
+          display: flex; align-items: center; justify-content: space-between;
+          gap: 16px; flex-wrap: wrap; margin-bottom: 6px;
         }
-        .vx-timeline-fill {
-          position: absolute;
-          left: 0; top: 0; height: 100%;
-          background: linear-gradient(90deg, var(--vx-blue), var(--vx-go));
-          box-shadow: 0 0 8px var(--vx-blue-glow);
+        .vx-model-stats { display: flex; gap: 18px; flex-wrap: wrap; }
+        .vx-model-stat { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.25; }
+        .vx-model-svg {
+          width: 100%;
+          height: clamp(150px, 22vh, 230px);
+          display: block;
         }
-        .vx-timeline-now {
-          position: absolute;
-          top: -5px;
-          width: 2px; height: 12px;
-          background: var(--vx-go);
-          box-shadow: 0 0 8px var(--vx-go-glow);
-          transform: translateX(-1px);
+        .vx-model-rail {
+          display: flex; gap: 6px; flex-wrap: wrap;
+          margin-top: 8px; padding-top: 8px;
+          border-top: 1px solid var(--vx-line);
         }
-        .vx-tl-event {
-          position: absolute;
-          transform: translateX(-50%);
-          display: flex;
-          flex-direction: column;
-          align-items: center;
+        .vx-model-ev {
           cursor: pointer;
-          background: none;
-          border: none;
-          padding: 0;
-        }
-        .vx-tl-tick { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--vx-bg0); background: var(--vx-blue-bright); }
-        .vx-tl-event.reached .vx-tl-tick { background: var(--vx-go); }
-        .vx-tl-lbl {
-          position: absolute;
+          background: rgba(20, 20, 23, 0.7);
+          border: 1px solid var(--vx-line);
+          border-radius: 2px;
+          padding: 3px 8px;
           font-family: var(--vx-font-display);
           font-size: 9px;
           letter-spacing: 0.1em;
           text-transform: uppercase;
-          color: var(--vx-fg-dim);
-          white-space: nowrap;
+          color: var(--vx-fg-faint);
         }
-        .vx-tl-event:hover .vx-tl-lbl { color: var(--vx-blue-bright); }
-        .vx-tl-lbl.above { bottom: 14px; }
-        .vx-tl-lbl.below { top: 14px; }
-        .vx-tl-time { font-family: var(--vx-font-mono); color: var(--vx-fg-faint); }
+        .vx-model-ev:hover { color: var(--vx-accent-bright); border-color: var(--vx-line-strong); }
+        .vx-model-ev.reached { color: var(--vx-fg); border-color: var(--vx-go); }
+        .vx-model-ev-t { font-family: var(--vx-font-mono); color: var(--vx-fg-faint); margin-left: 4px; }
       `}</style>
 
       {/* ---------- Mission Control Header ---------- */}
@@ -2466,7 +2664,7 @@ ${trkpts}
                           fontSize: 10,
                           letterSpacing: "0.08em",
                           ...(vehicleFilter === v
-                            ? { borderColor: "var(--vx-blue)", color: "var(--vx-blue-bright)", background: "rgba(31,157,255,0.15)" }
+                            ? { borderColor: "var(--vx-accent)", color: "var(--vx-accent-bright)", background: "rgba(162, 166, 174,0.15)" }
                             : { color: "var(--vx-fg-dim)" }),
                         }}
                       >
@@ -2580,30 +2778,7 @@ ${trkpts}
               {flightMode ? "◆ Flight (Locked)" : "◇ Build Mode"}
             </button>
 
-            <button className="vx-btn" onClick={() => setVehicleOpen(true)} title="Vehicle setup — upload rocket CAD, staging & recovery">🚀 Vehicle</button>
-            <button
-              className={`vx-btn ${voiceOn ? "" : "vx-btn-danger"}`}
-              onClick={toggleVoice}
-              title="Voice callouts — spoken flight events (liftoff, apogee, main…)"
-            >
-              {voiceOn ? "🔈 Voice" : "🔇 Voice"}
-            </button>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 2 }} title="Console zoom — scales the whole display">
-              <button className="vx-tbtn" onClick={() => adjustZoom(-0.1)} style={{ height: 34 }}>−</button>
-              <button className="vx-tbtn" onClick={resetZoom} style={{ height: 34, minWidth: 44 }} title="Reset zoom to 100%">
-                {Math.round(uiZoom * 100)}%
-              </button>
-              <button className="vx-tbtn" onClick={() => adjustZoom(0.1)} style={{ height: 34 }}>+</button>
-            </span>
-
-            <button
-              className={`vx-btn ${fieldMode ? "vx-btn-primary" : ""}`}
-              onClick={toggleFieldMode}
-              title="Field mode — maximum contrast for direct sunlight"
-            >
-              ☀ Field
-            </button>
-            <button className="vx-btn" onClick={() => setSettingsOpen(true)} title="Settings">Settings</button>
+            <button className="vx-btn" onClick={() => setSettingsOpen(true)} title="Settings — display, vehicle, export, tools">Settings</button>
             <button className="vx-btn" onClick={() => setPaletteOpen(true)} title="Command Palette (Ctrl+K)">⌘K</button>
           </div>
         </div>
@@ -2626,14 +2801,21 @@ ${trkpts}
               ACK
             </button>
             <button className={`vx-btn ${alarmMuted ? "vx-btn-danger" : ""}`} onClick={toggleAlarmMute} title="Master alarm mute">
-              {alarmMuted ? "🔇 Muted" : "🔊 Audio"}
+              {alarmMuted ? "Muted" : "Audio"}
             </button>
           </div>
         </div>
       )}
 
-      {/* Mission Timeline */}
-      <MissionTimeline events={derivedEvents} currentTms={display.t_ms} onJump={jumpToEvent} />
+      {/* Mission Model — live launch profile from the pad coordinates */}
+      <MissionModel
+        events={derivedEvents}
+        frames={display.frames}
+        latest={display.latest}
+        currentTms={display.t_ms}
+        phase={flightPhase}
+        onJump={jumpToEvent}
+      />
 
       {/* Alerts */}
       {alerts.length > 0 && (
@@ -2641,7 +2823,7 @@ ${trkpts}
           {alerts.map((a) => (
             <div key={a.id} className={`vx-alert ${a.level}`}>
               <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 12 }}>
-                <span className={`vx-dot`} style={{ background: a.level === "crit" ? "var(--vx-crit)" : a.level === "warn" ? "var(--vx-caution)" : "var(--vx-blue)" }} />
+                <span className={`vx-dot`} style={{ background: a.level === "crit" ? "var(--vx-crit)" : a.level === "warn" ? "var(--vx-caution)" : "var(--vx-accent)" }} />
                 <div>
                   <div className="vx-alert-title">{a.title}</div>
                   {a.detail ? <div style={{ color: "var(--vx-fg-dim)", fontSize: 12, fontFamily: "var(--vx-font-mono)" }}>{a.detail}</div> : null}
@@ -2794,7 +2976,7 @@ ${trkpts}
           </button>
           {selectedPreset && (
             <button className="vx-btn vx-btn-danger" onClick={deleteSelectedPreset} disabled={!isLayoutEditable} title={`Delete preset "${selectedPreset}"`}>
-              ✕
+              ×
             </button>
           )}
         </div>
@@ -2807,10 +2989,8 @@ ${trkpts}
           >
             Flight Log{flights.length ? ` (${flights.length})` : ""}
           </button>
-          <button className="vx-btn" onClick={exportSessionJSONL} title={`Export raw telemetry (Ctrl+E) (${logCount})`}>Export JSONL</button>
-          <button className="vx-btn" onClick={exportFramesCSV} title="Export frames as CSV (Ctrl+Shift+E)">Export CSV</button>
           {ghostFlight && (
-            <span className="vx-chip" style={{ borderColor: "var(--vx-blue)", color: "var(--vx-blue-bright)" }} title="Comparison overlay active on all plots">
+            <span className="vx-chip" style={{ borderColor: "var(--vx-accent)", color: "var(--vx-accent-bright)" }} title="Comparison overlay active on all plots">
               GHOST: {ghostFlight.name.slice(0, 24)}
               <button
                 onClick={() => setGhostFlight(null)}
@@ -2821,12 +3001,7 @@ ${trkpts}
               </button>
             </span>
           )}
-          <button className="vx-btn" onClick={exportKML} title="Export GPS track as KML — open with Google Earth Pro or import at earth.google.com">Export KML</button>
-          <button className="vx-btn" onClick={exportGPX} title="Export GPS track as GPX — works with most GPS/mapping apps">Export GPX</button>
-          <button className="vx-btn" onClick={openFlightReport} title="Print-ready mission report (use Print → Save as PDF)">Report</button>
-          <button className="vx-btn" onClick={() => setAlertRulesOpen(true)} title="Custom alert thresholds on any telemetry field">Alert Rules{alertRules.length ? ` (${alertRules.length})` : ""}</button>
-          <button className="vx-btn" onClick={() => setRadioOpen(true)} title="Configure a SiK/RFD900-family telemetry radio over the serial link">Radio</button>
-          <button className="vx-btn" onClick={() => setFieldMapOpen(true)} title="Map custom firmware field names onto the VX telemetry contract">Field Map</button>
+          <button className="vx-btn" onClick={() => setExportOpen(true)} title="Export flight data — choose a file format">Export</button>
 
           <label className="vx-btn" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
             Load Log
@@ -3000,6 +3175,39 @@ ${trkpts}
           onThemeReset={resetTheme}
           onBatt={(p) => saveBattProfile(p)}
           onUnits={(u) => saveGlobalUnits(u)}
+          voiceOn={voiceOn}
+          onToggleVoice={toggleVoice}
+          fieldMode={fieldMode}
+          onToggleFieldMode={toggleFieldMode}
+          uiZoom={uiZoom}
+          onZoom={adjustZoom}
+          onZoomReset={resetZoom}
+          alarmMuted={alarmMuted}
+          onToggleAlarmMute={toggleAlarmMute}
+          alertRuleCount={alertRules.length}
+          onOpenExport={() => setExportOpen(true)}
+          onOpenVehicle={() => setVehicleOpen(true)}
+          onOpenAlertRules={() => setAlertRulesOpen(true)}
+          onOpenRadio={() => setRadioOpen(true)}
+          onOpenFieldMap={() => setFieldMapOpen(true)}
+        />
+      )}
+
+      {/* Export Modal — asks which file format, then writes it */}
+      {exportOpen && (
+        <ExportModal
+          frameCount={display.frames.length}
+          rawCount={logCount}
+          hasGps={display.frames.some((f) => typeof f.lat === "number" && typeof f.lon === "number")}
+          onClose={() => setExportOpen(false)}
+          onExport={(fmt) => {
+            if (fmt === "jsonl") exportSessionJSONL();
+            else if (fmt === "csv") exportFramesCSV();
+            else if (fmt === "kml") exportKML();
+            else if (fmt === "gpx") exportGPX();
+            else if (fmt === "report") openFlightReport();
+            setExportOpen(false);
+          }}
         />
       )}
 
@@ -3255,12 +3463,12 @@ function SimSetupModal(props: { onClose: () => void }) {
         onMouseDown={(e) => e.stopPropagation()}
         style={{
           width: "min(920px, 96vw)", maxHeight: "90vh", overflow: "auto",
-          background: "rgba(7,11,22,0.98)", border: "1px solid var(--vx-line-strong)",
+          background: "rgba(17, 17, 18,0.98)", border: "1px solid var(--vx-line-strong)",
           borderRadius: 4, boxShadow: "0 22px 70px rgba(0,0,0,0.75)", padding: 20,
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>🧮 Flight Simulation Setup</div>
+          <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>Flight Simulation Setup</div>
           <button className="vx-xbtn" onClick={props.onClose}>×</button>
         </div>
         <div style={{ fontSize: 12, color: "var(--vx-fg-dim)", lineHeight: 1.6, marginBottom: 14 }}>
@@ -3356,11 +3564,11 @@ function SimSetupModal(props: { onClose: () => void }) {
               {pred ? (
                 pred.failsToLift ? (
                   <div style={{ color: "var(--vx-crit)", fontWeight: 700, letterSpacing: "0.08em", fontSize: 13 }}>
-                    ✗ WILL NOT LIFT — thrust/weight {pred.thrustToWeight.toFixed(2)} ≤ 1. Bigger motor or lighter rocket.
+                    WILL NOT LIFT — thrust/weight {pred.thrustToWeight.toFixed(2)} ≤ 1. Bigger motor or lighter rocket.
                   </div>
                 ) : (
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontFamily: "var(--vx-font-mono)", fontSize: 13 }}>
-                    <div><span className="vx-label">APOGEE</span><br /><b style={{ fontSize: 20, color: "var(--vx-blue-bright)" }}>{m2ft(pred.apogeeM)}</b></div>
+                    <div><span className="vx-label">APOGEE</span><br /><b style={{ fontSize: 20, color: "var(--vx-accent-bright)" }}>{m2ft(pred.apogeeM)}</b></div>
                     <div><span className="vx-label">MAX VELOCITY</span><br /><b style={{ fontSize: 20 }}>{pred.maxVelMps.toFixed(0)} m/s{pred.maxMach >= 0.3 ? ` · M${pred.maxMach.toFixed(2)}` : ""}</b></div>
                     <div><span className="vx-label">MAX ACCEL</span><br /><b>{pred.maxAccelG.toFixed(1)} g</b></div>
                     <div>
@@ -3398,7 +3606,7 @@ function SimSetupModal(props: { onClose: () => void }) {
                     rel="noreferrer"
                     title="Walking directions from your pad to the predicted landing point — rehearse the recovery"
                   >
-                    🗺 Rehearse recovery route in Google Maps
+                    Rehearse recovery route in Google Maps
                   </a>
                   <a
                     className="vx-btn"
@@ -3461,12 +3669,12 @@ function RadioModal(props: { connected: boolean; onSend: (cmd: string) => void; 
         onMouseDown={(e) => e.stopPropagation()}
         style={{
           width: "min(640px, 94vw)", maxHeight: "86vh", overflow: "auto",
-          background: "rgba(7,11,22,0.98)", border: "1px solid var(--vx-line-strong)",
+          background: "rgba(17, 17, 18,0.98)", border: "1px solid var(--vx-line-strong)",
           borderRadius: 4, boxShadow: "0 22px 70px rgba(0,0,0,0.75)", padding: 20,
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>📡 Radio Config</div>
+          <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>Radio Config</div>
           <button className="vx-xbtn" onClick={props.onClose}>×</button>
         </div>
 
@@ -3543,7 +3751,7 @@ function AlertRulesModal(props: { rules: AlertRule[]; onChange: (rules: AlertRul
         onMouseDown={(e) => e.stopPropagation()}
         style={{
           width: "min(720px, 94vw)", maxHeight: "86vh", overflow: "auto",
-          background: "rgba(7,11,22,0.98)", border: "1px solid var(--vx-line-strong)",
+          background: "rgba(17, 17, 18,0.98)", border: "1px solid var(--vx-line-strong)",
           borderRadius: 4, boxShadow: "0 22px 70px rgba(0,0,0,0.75)", padding: 20,
         }}
       >
@@ -3632,7 +3840,7 @@ function FieldMapModal(props: { onClose: () => void }) {
         onMouseDown={(e) => e.stopPropagation()}
         style={{
           width: "min(640px, 94vw)", maxHeight: "86vh", overflow: "auto",
-          background: "rgba(7,11,22,0.98)", border: "1px solid var(--vx-line-strong)",
+          background: "rgba(17, 17, 18,0.98)", border: "1px solid var(--vx-line-strong)",
           borderRadius: 4, boxShadow: "0 22px 70px rgba(0,0,0,0.75)", padding: 20,
         }}
       >
@@ -3775,12 +3983,12 @@ function VehicleModal(props: { onClose: () => void }) {
         onMouseDown={(e) => e.stopPropagation()}
         style={{
           width: "min(720px, 94vw)", maxHeight: "88vh", overflow: "auto",
-          background: "rgba(7,11,22,0.98)", border: "1px solid var(--vx-line-strong)",
+          background: "rgba(17, 17, 18,0.98)", border: "1px solid var(--vx-line-strong)",
           borderRadius: 4, boxShadow: "0 22px 70px rgba(0,0,0,0.75)", padding: 20,
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>🚀 Vehicle Setup</div>
+          <div style={{ fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: 15 }}>Vehicle Setup</div>
           <button className="vx-xbtn" onClick={props.onClose}>×</button>
         </div>
 
@@ -3857,7 +4065,11 @@ function VehicleModal(props: { onClose: () => void }) {
   );
 }
 
-/** ---------- SettingsModal ---------- */
+/** ---------- SettingsModal ----------
+ * Organized into tabs so the theme controls aren't fighting the rest of the app
+ * config for space. Everything that used to clutter the top bar lives here. */
+type SettingsTab = "display" | "flight" | "data" | "tools";
+
 function SettingsModal(props: {
   theme: ThemeSettings;
   battProfile: BatteryProfile;
@@ -3868,191 +4080,386 @@ function SettingsModal(props: {
   onThemeReset: () => void;
   onBatt: (patch: Partial<BatteryProfile>) => void;
   onUnits: (u: UnitSystem) => void;
+  voiceOn: boolean;
+  onToggleVoice: () => void;
+  fieldMode: boolean;
+  onToggleFieldMode: () => void;
+  uiZoom: number;
+  onZoom: (delta: number) => void;
+  onZoomReset: () => void;
+  alarmMuted: boolean;
+  onToggleAlarmMute: () => void;
+  alertRuleCount: number;
+  onOpenExport: () => void;
+  onOpenVehicle: () => void;
+  onOpenAlertRules: () => void;
+  onOpenRadio: () => void;
+  onOpenFieldMap: () => void;
 }) {
-  const fg = autoTextColor(props.theme.bgB);
+  const [tab, setTab] = useState<SettingsTab>("display");
+
+  const TABS: Array<{ id: SettingsTab; label: string }> = [
+    { id: "display", label: "Display" },
+    { id: "flight", label: "Flight" },
+    { id: "data", label: "Data" },
+    { id: "tools", label: "Tools" },
+  ];
 
   return (
     <div className="vx-modal-backdrop" onMouseDown={props.onClose}>
-      <div className="vx-modal" onMouseDown={(e) => e.stopPropagation()}>
-        {/* Left: Theme + Units */}
-        <div className="vx-pane">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-            <div style={{ fontWeight: 900, fontSize: 18 }}>Settings</div>
-            <button className="vx-xbtn" onClick={props.onClose}>×</button>
-          </div>
-
-          <div className="vx-card" style={{ marginTop: 12 }}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Units</div>
-            <select className="vx-select" value={props.globalUnits} onChange={(e) => props.onUnits(e.target.value as UnitSystem)} style={{ width: "100%" }}>
-              <option value="metric">Metric</option>
-              <option value="imperial">Imperial</option>
-            </select>
-          </div>
-
-          <div className="vx-card" style={{ marginTop: 12 }}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Theme</div>
-
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-              {THEME_PRESETS.map((p) => (
-                <button key={p.name} className="vx-btn" onClick={() => props.onThemePreset(p.theme)}>
-                  {p.name}
-                </button>
-              ))}
-              <button className="vx-btn vx-btn-danger" onClick={props.onThemeReset}>Reset</button>
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <ColorTile
-                label="Background A"
-                value={props.theme.bgA}
-                onChange={(v) => props.onTheme({ bgA: v })}
-                onReset={() => props.onTheme({ bgA: DEFAULT_THEME.bgA })}
-              />
-              <ColorTile
-                label="Background B"
-                value={props.theme.bgB}
-                onChange={(v) => props.onTheme({ bgB: v })}
-                onReset={() => props.onTheme({ bgB: DEFAULT_THEME.bgB })}
-              />
-            </div>
-
-            <div style={{ marginTop: 10 }}>
-              <ColorTile
-                label="Console Background"
-                value={props.theme.consoleBg}
-                onChange={(v) => props.onTheme({ consoleBg: v })}
-                onReset={() => props.onTheme({ consoleBg: DEFAULT_THEME.consoleBg })}
-              />
-            </div>
-
-            <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--vx-line)" }}>
-              <div style={{ fontWeight: 900, marginBottom: 4 }}>App Background</div>
-              <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 10 }}>
-                The color behind the whole console, not just the dashboard panel. Pick a dark shade for readability.
-              </div>
-              <ColorTile
-                label="Background Color"
-                value={props.theme.appBg ?? "#05070e"}
-                onChange={(v) => props.onTheme({ appBg: v })}
-                onReset={() => props.onTheme({ appBg: undefined })}
-              />
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
-              Auto text color: <code>{fg}</code>
-            </div>
-          </div>
+      <div className="vx-modal vx-settings" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="vx-settings-head">
+          <div style={{ fontWeight: 700, fontSize: 18, letterSpacing: "0.06em", textTransform: "uppercase" }}>Settings</div>
+          <button className="vx-xbtn" onClick={props.onClose}>×</button>
         </div>
 
-        {/* Middle: Battery */}
-        <div className="vx-pane">
-          <div className="vx-card">
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Battery Profile</div>
+        <div className="vx-settings-tabs">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              className={`vx-tab ${tab === t.id ? "active" : ""}`}
+              onClick={() => setTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Chemistry</div>
-                <select className="vx-select" value={props.battProfile.chem} onChange={(e) => props.onBatt({ chem: e.target.value as BatteryChem })} style={{ width: "100%" }}>
-                  <option value="LiPo">LiPo</option>
-                  <option value="LiIon">Li-Ion</option>
-                  <option value="LiFe">LiFePO4</option>
+        <div className="vx-settings-body">
+          {tab === "display" && (
+            <>
+              <div className="vx-card">
+                <div className="vx-card-title">Theme</div>
+                <div className="vx-help">Presets are graphite variants sampled from the VX logo.</div>
+                <div className="vx-preset-row">
+                  {THEME_PRESETS.map((p) => (
+                    <button key={p.name} className="vx-btn" onClick={() => props.onThemePreset(p.theme)}>
+                      {p.name}
+                    </button>
+                  ))}
+                  <button className="vx-btn vx-btn-danger" onClick={props.onThemeReset}>Reset</button>
+                </div>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Colors</div>
+                <div className="vx-color-grid">
+                  <ColorTile
+                    label="App Background"
+                    value={props.theme.appBg ?? "#111112"}
+                    onChange={(v) => props.onTheme({ appBg: v })}
+                    onReset={() => props.onTheme({ appBg: DEFAULT_THEME.appBg })}
+                  />
+                  <ColorTile
+                    label="Panel Top"
+                    value={props.theme.bgA}
+                    onChange={(v) => props.onTheme({ bgA: v })}
+                    onReset={() => props.onTheme({ bgA: DEFAULT_THEME.bgA })}
+                  />
+                  <ColorTile
+                    label="Panel Bottom"
+                    value={props.theme.bgB}
+                    onChange={(v) => props.onTheme({ bgB: v })}
+                    onReset={() => props.onTheme({ bgB: DEFAULT_THEME.bgB })}
+                  />
+                  <ColorTile
+                    label="Console"
+                    value={props.theme.consoleBg}
+                    onChange={(v) => props.onTheme({ consoleBg: v })}
+                    onReset={() => props.onTheme({ consoleBg: DEFAULT_THEME.consoleBg })}
+                  />
+                </div>
+                <div className="vx-help" style={{ marginTop: 10 }}>
+                  The technical grid overlay stays on top of whatever background color you pick.
+                </div>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Preview</div>
+                <div
+                  style={{
+                    height: 110,
+                    borderRadius: 3,
+                    border: "1px solid var(--vx-line)",
+                    background: `linear-gradient(135deg, ${props.theme.bgA}, ${props.theme.bgB})`,
+                    color: autoTextColor(props.theme.bgB),
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontWeight: 700,
+                    letterSpacing: "0.18em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  VX Telemetry
+                </div>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Console</div>
+                <ToggleRow
+                  label="Field mode"
+                  hint="Maximum contrast for direct sunlight"
+                  on={props.fieldMode}
+                  onToggle={props.onToggleFieldMode}
+                />
+                <div className="vx-row">
+                  <div>
+                    <div className="vx-row-label">Zoom</div>
+                    <div className="vx-help">Scales the whole display</div>
+                  </div>
+                  <div style={{ display: "inline-flex", gap: 2, alignItems: "center" }}>
+                    <button className="vx-tbtn" onClick={() => props.onZoom(-0.1)}>−</button>
+                    <button className="vx-tbtn" onClick={props.onZoomReset} style={{ minWidth: 52 }}>
+                      {Math.round(props.uiZoom * 100)}%
+                    </button>
+                    <button className="vx-tbtn" onClick={() => props.onZoom(0.1)}>+</button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Units</div>
+                <select className="vx-select" value={props.globalUnits} onChange={(e) => props.onUnits(e.target.value as UnitSystem)} style={{ width: "100%" }}>
+                  <option value="metric">Metric (m, m/s, °C)</option>
+                  <option value="imperial">Imperial (ft, ft/s, °F)</option>
                 </select>
               </div>
+            </>
+          )}
 
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Cells (S)</div>
-                <input
-                  className="vx-input"
-                  type="number"
-                  min={1}
-                  max={12}
-                  value={props.battProfile.cells}
-                  onChange={(e) => props.onBatt({ cells: Math.max(1, Math.min(12, Number(e.target.value) || 1)) })}
+          {tab === "flight" && (
+            <>
+              <div className="vx-card">
+                <div className="vx-card-title">Vehicle</div>
+                <div className="vx-help">Upload rocket CAD, configure staging and recovery.</div>
+                <button className="vx-btn vx-btn-primary" style={{ marginTop: 10 }} onClick={props.onOpenVehicle}>
+                  Open Vehicle Setup
+                </button>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Audio</div>
+                <ToggleRow
+                  label="Voice callouts"
+                  hint="Spoken flight events — liftoff, apogee, main"
+                  on={props.voiceOn}
+                  onToggle={props.onToggleVoice}
+                />
+                <ToggleRow
+                  label="Master alarm"
+                  hint="Audible caution tone on critical alerts"
+                  on={!props.alarmMuted}
+                  onToggle={props.onToggleAlarmMute}
                 />
               </div>
-            </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Warn %</div>
-                <input
-                  className="vx-input"
-                  type="number"
-                  min={1}
-                  max={99}
-                  value={props.battProfile.warnPct}
-                  onChange={(e) => props.onBatt({ warnPct: Math.max(1, Math.min(99, Number(e.target.value) || 20)) })}
-                />
-              </div>
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>Critical %</div>
-                <input
-                  className="vx-input"
-                  type="number"
-                  min={0}
-                  max={98}
-                  value={props.battProfile.critPct}
-                  onChange={(e) => props.onBatt({ critPct: Math.max(0, Math.min(98, Number(e.target.value) || 10)) })}
-                />
-              </div>
-            </div>
+              <div className="vx-card">
+                <div className="vx-card-title">Battery Profile</div>
+                <div className="vx-help">Drives the battery % estimator from incoming <code>batt_v</code>.</div>
 
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8, lineHeight: 1.6 }}>
-              This affects the battery % estimator using incoming <code>batt_v</code>.
-            </div>
-          </div>
+                <div className="vx-field-grid" style={{ marginTop: 10 }}>
+                  <div>
+                    <div className="vx-row-label">Chemistry</div>
+                    <select className="vx-select" value={props.battProfile.chem} onChange={(e) => props.onBatt({ chem: e.target.value as BatteryChem })} style={{ width: "100%" }}>
+                      <option value="LiPo">LiPo</option>
+                      <option value="LiIon">Li-Ion</option>
+                      <option value="LiFe">LiFePO4</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div className="vx-row-label">Cells (S)</div>
+                    <input
+                      className="vx-input"
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={props.battProfile.cells}
+                      onChange={(e) => props.onBatt({ cells: Math.max(1, Math.min(12, Number(e.target.value) || 1)) })}
+                    />
+                  </div>
+                  <div>
+                    <div className="vx-row-label">Warn %</div>
+                    <input
+                      className="vx-input"
+                      type="number"
+                      min={1}
+                      max={99}
+                      value={props.battProfile.warnPct}
+                      onChange={(e) => props.onBatt({ warnPct: Math.max(1, Math.min(99, Number(e.target.value) || 20)) })}
+                    />
+                  </div>
+                  <div>
+                    <div className="vx-row-label">Critical %</div>
+                    <input
+                      className="vx-input"
+                      type="number"
+                      min={0}
+                      max={98}
+                      value={props.battProfile.critPct}
+                      onChange={(e) => props.onBatt({ critPct: Math.max(0, Math.min(98, Number(e.target.value) || 10)) })}
+                    />
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
+          {tab === "data" && (
+            <>
+              <div className="vx-card">
+                <div className="vx-card-title">Export</div>
+                <div className="vx-help">Choose a file format — raw telemetry, frames, GPS track, or a print-ready report.</div>
+                <button className="vx-btn vx-btn-primary" style={{ marginTop: 10 }} onClick={props.onOpenExport}>
+                  Export Flight Data…
+                </button>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Alert Rules</div>
+                <div className="vx-help">Custom thresholds on any telemetry field.</div>
+                <button className="vx-btn" style={{ marginTop: 10 }} onClick={props.onOpenAlertRules}>
+                  Edit Alert Rules{props.alertRuleCount ? ` (${props.alertRuleCount})` : ""}
+                </button>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Field Map</div>
+                <div className="vx-help">Map custom firmware field names onto the VX telemetry contract.</div>
+                <button className="vx-btn" style={{ marginTop: 10 }} onClick={props.onOpenFieldMap}>
+                  Open Field Map
+                </button>
+              </div>
+            </>
+          )}
+
+          {tab === "tools" && (
+            <>
+              <div className="vx-card">
+                <div className="vx-card-title">Radio</div>
+                <div className="vx-help">Configure a SiK / RFD900-family telemetry radio over the serial link.</div>
+                <button className="vx-btn" style={{ marginTop: 10 }} onClick={props.onOpenRadio}>
+                  Open Radio Config
+                </button>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Shortcuts</div>
+                <div className="vx-kbd-list">
+                  <div><code>Ctrl+K</code><span>Command palette</span></div>
+                  <div><code>F</code><span>Freeze / unfreeze</span></div>
+                  <div><code>Ctrl+E</code><span>Export JSONL</span></div>
+                  <div><code>Ctrl+Shift+E</code><span>Export CSV</span></div>
+                  <div><code>Esc</code><span>Close menus / modals</span></div>
+                </div>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Privacy</div>
+                <div className="vx-help">
+                  All telemetry stays on this machine. Flights are archived to local browser storage
+                  (IndexedDB); nothing is uploaded anywhere.
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
-        {/* Right: info */}
-        <div className="vx-pane">
-          <div className="vx-card">
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>3D Vehicle</div>
-            <div style={{ fontSize: 12, opacity: 0.85, lineHeight: 1.6 }}>
-              Upload your rocket CAD and set up staging / recovery from the{" "}
-              <b style={{ color: "var(--vx-blue-bright)" }}>VEHICLE</b> button in the top bar. The 3D Vehicle widget then
-              flies your model live from telemetry attitude, animating separation and chute deploy through the flight.
-            </div>
-          </div>
-
-          <div className="vx-card" style={{ marginTop: 12 }}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Shortcuts</div>
-            <div style={{ fontSize: 12, opacity: 0.85, lineHeight: 1.8 }}>
-              <div><code>Ctrl+K</code> Command Palette</div>
-              <div><code>F</code> Freeze/Unfreeze</div>
-              <div><code>Ctrl+E</code> Export JSONL</div>
-              <div><code>Ctrl+Shift+E</code> Export CSV</div>
-              <div><code>Esc</code> Close menus/modals</div>
-            </div>
-          </div>
-
-          <div className="vx-card" style={{ marginTop: 12 }}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Preview</div>
-            <div
-              style={{
-                height: 120,
-                borderRadius: 14,
-                border: "1px solid rgba(255,255,255,0.14)",
-                background: `linear-gradient(135deg, ${props.theme.bgA}, ${props.theme.bgB})`,
-                color: autoTextColor(props.theme.bgB),
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontWeight: 900,
-              }}
-            >
-              Valdex Telemetry
-            </div>
-          </div>
-
-          <div style={{ marginTop: 14, display: "flex", justifyContent: "flex-end", gap: 10 }}>
-            <button className="vx-btn" onClick={props.onClose}>Done</button>
-          </div>
+        <div className="vx-settings-foot">
+          <button className="vx-btn vx-btn-primary" onClick={props.onClose}>Done</button>
         </div>
       </div>
     </div>
   );
 }
 
+/** A labeled on/off row used throughout Settings. */
+function ToggleRow(props: { label: string; hint?: string; on: boolean; onToggle: () => void }) {
+  return (
+    <div className="vx-row">
+      <div>
+        <div className="vx-row-label">{props.label}</div>
+        {props.hint ? <div className="vx-help">{props.hint}</div> : null}
+      </div>
+      <button
+        className={`vx-switch ${props.on ? "on" : ""}`}
+        onClick={props.onToggle}
+        role="switch"
+        aria-checked={props.on}
+        aria-label={props.label}
+      >
+        <span className="vx-switch-knob" />
+      </button>
+    </div>
+  );
+}
+
+/** ---------- ExportModal ----------
+ * Single export entry point: pick a format, then write the file. */
+type ExportFormat = "jsonl" | "csv" | "kml" | "gpx" | "report";
+
+function ExportModal(props: {
+  frameCount: number;
+  rawCount: number;
+  hasGps: boolean;
+  onClose: () => void;
+  onExport: (fmt: ExportFormat) => void;
+}) {
+  const [fmt, setFmt] = useState<ExportFormat>("jsonl");
+
+  const OPTIONS: Array<{ id: ExportFormat; name: string; ext: string; desc: string; disabled?: boolean; note?: string }> = [
+    { id: "jsonl", name: "Raw telemetry", ext: ".jsonl", desc: `Every received line, exactly as it arrived (${props.rawCount} lines).` },
+    { id: "csv", name: "Frames", ext: ".csv", desc: `Parsed frames as a spreadsheet (${props.frameCount} frames).` },
+    {
+      id: "kml", name: "GPS track", ext: ".kml", desc: "Opens in Google Earth Pro or earth.google.com.",
+      disabled: !props.hasGps, note: "No GPS fixes in this flight",
+    },
+    {
+      id: "gpx", name: "GPS track", ext: ".gpx", desc: "Works with most GPS and mapping apps.",
+      disabled: !props.hasGps, note: "No GPS fixes in this flight",
+    },
+    { id: "report", name: "Mission report", ext: "PDF", desc: "Print-ready summary — use Print → Save as PDF." },
+  ];
+
+  return (
+    <div className="vx-modal-backdrop" onMouseDown={props.onClose}>
+      <div className="vx-modal vx-export" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="vx-settings-head">
+          <div style={{ fontWeight: 700, fontSize: 18, letterSpacing: "0.06em", textTransform: "uppercase" }}>Export</div>
+          <button className="vx-xbtn" onClick={props.onClose}>×</button>
+        </div>
+
+        <div className="vx-settings-body">
+          <div className="vx-help" style={{ marginBottom: 12 }}>What file format do you want?</div>
+          <div className="vx-export-list">
+            {OPTIONS.map((o) => (
+              <button
+                key={o.id}
+                className={`vx-export-opt ${fmt === o.id ? "active" : ""}`}
+                onClick={() => !o.disabled && setFmt(o.id)}
+                disabled={o.disabled}
+                title={o.disabled ? o.note : o.desc}
+              >
+                <span className="vx-export-radio" aria-hidden="true" />
+                <span style={{ minWidth: 0 }}>
+                  <span className="vx-export-name">
+                    {o.name} <span className="vx-export-ext">{o.ext}</span>
+                  </span>
+                  <span className="vx-export-desc">{o.disabled ? o.note : o.desc}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="vx-settings-foot">
+          <button className="vx-btn" onClick={props.onClose}>Cancel</button>
+          <button className="vx-btn vx-btn-primary" onClick={() => props.onExport(fmt)}>Export</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 /** ---------- ColorTile (better UX + reset) ---------- */
 function ColorTile(props: { label: string; value: string; onChange: (v: string) => void; onReset: () => void }) {
   const text = autoTextColor(props.value);
@@ -4123,7 +4530,7 @@ function CommandPalette(props: {
           width: "min(760px, 92vw)",
           borderRadius: 16,
           padding: 12,
-          background: "rgba(10,14,30,0.96)",
+          background: "rgba(20, 20, 23,0.96)",
           border: "1px solid rgba(255,255,255,0.16)",
           boxShadow: "0 22px 70px rgba(0,0,0,0.65)",
           color: "var(--vx-fg)",
@@ -4172,7 +4579,7 @@ function AdvancedAddModal(props: {
   const [h, setH] = useState<number>(() => selected?.defaultSize?.h ?? 6);
 
   const [unitsMode, setUnitsMode] = useState<"inherit" | UnitSystem>("inherit");
-  const [accent, setAccent] = useState<string>(() => selected?.defaultTheme?.accent ?? "#7aa2ff");
+  const [accent, setAccent] = useState<string>(() => selected?.defaultTheme?.accent ?? "#a2a6ae");
   const [view, setView] = useState<"card" | "instrument" | "plot">(() => selected?.defaultView ?? "card");
 
   useEffect(() => {
@@ -4180,7 +4587,7 @@ function AdvancedAddModal(props: {
     if (!def) return;
     setW(def.defaultSize?.w ?? 6);
     setH(def.defaultSize?.h ?? 6);
-    setAccent(def.defaultTheme?.accent ?? "#7aa2ff");
+    setAccent(def.defaultTheme?.accent ?? "#a2a6ae");
     setView(def.defaultView ?? "card");
     setUnitsMode("inherit");
   }, [selectedId]);
@@ -4219,7 +4626,7 @@ function AdvancedAddModal(props: {
                   className="vx-card"
                   style={{
                     cursor: "pointer",
-                    outline: isSel ? "2px solid rgba(90,160,255,0.55)" : "none",
+                    outline: isSel ? "2px solid rgba(168, 171, 177,0.55)" : "none",
                     opacity: ok ? 1 : 0.55,
                   }}
                   title={d.hardwareHint ?? ""}
@@ -4398,7 +4805,7 @@ function WidgetFrame(props: {
   const requires = normalizeRequires(def?.requires);
   const enabled = requires.length === 0 || requires.every((r) => capHas(props.caps, r));
 
-  const defaultAccent = def?.defaultTheme?.accent ?? "#7aa2ff";
+  const defaultAccent = def?.defaultTheme?.accent ?? "#a2a6ae";
   const accent = props.settings?.accent ?? defaultAccent;
   const unitSystem: UnitSystem = props.settings?.units ?? props.globalUnits;
   const supportedViews: Array<"card" | "instrument" | "plot"> = def?.views ?? ["card"];
@@ -4463,7 +4870,7 @@ function WidgetFrame(props: {
       className="vx-widget vx-widget-outline"
       style={{
         border: `1px solid var(--vx-line)`,
-        background: "linear-gradient(180deg, rgba(31,157,255,0.03), rgba(8,13,24,0.85))",
+        background: "linear-gradient(180deg, rgba(162, 166, 174,0.03), rgba(20, 20, 23,0.85))",
         boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
         opacity: enabled ? 1 : 0.3,
       }}
@@ -4515,7 +4922,7 @@ function WidgetFrame(props: {
                 className="vx-tbtn"
                 onClick={cycleWidgetVid}
                 title={`Vehicle: ${widgetVid ?? "follow global selection"} — click to cycle`}
-                style={widgetVid ? { color: "var(--vx-blue-bright)", borderColor: "var(--vx-blue)" } : undefined}
+                style={widgetVid ? { color: "var(--vx-accent-bright)", borderColor: "var(--vx-accent)" } : undefined}
               >
                 {widgetVid ? `▲${widgetVid === "ALL" ? "ALL" : widgetVid}` : "▲G"}
               </button>

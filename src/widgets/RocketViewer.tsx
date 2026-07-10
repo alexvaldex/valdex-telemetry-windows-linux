@@ -17,7 +17,7 @@ import { loadModelObject, normalizeModel } from "./rocketModel";
 type Q = { w: number; x: number; y: number; z: number } | null;
 
 /** Procedural fallback airframe — nose points +Y, tail toward -Y. */
-function ProceduralAirframe({ color = "#cfd6e6", accent = "#7aa2ff" }: { color?: string; accent?: string }) {
+function ProceduralAirframe({ color = "#cfd6e6", accent = "#a2a6ae" }: { color?: string; accent?: string }) {
   return (
     <group>
       <mesh>
@@ -229,8 +229,8 @@ export default function RocketViewer(props: { q: Q; frames: Array<{ t_ms: number
 
       {/* Phase / config HUD overlay */}
       <div style={{ position: "absolute", left: 8, top: 8, display: "flex", gap: 6, alignItems: "center", pointerEvents: "none" }}>
-        <span className="vx-chip" style={{ background: "rgba(4,7,14,0.7)" }}>{phase}</span>
-        {config.stages === 2 && <span className="vx-chip" style={{ background: "rgba(4,7,14,0.7)" }}>2-STAGE</span>}
+        <span className="vx-chip" style={{ background: "rgba(10, 10, 11,0.7)" }}>{phase}</span>
+        {config.stages === 2 && <span className="vx-chip" style={{ background: "rgba(10, 10, 11,0.7)" }}>2-STAGE</span>}
       </div>
       {status && (
         <div style={{ position: "absolute", left: 8, bottom: 8, right: 8, fontSize: 11, color: "var(--vx-crit)", fontFamily: "var(--vx-font-mono)" }}>

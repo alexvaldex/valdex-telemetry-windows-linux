@@ -13,9 +13,10 @@ export type WidgetId =
   | "env.card"
   | "checklist.panel"
   | "tilt.spin"
-  | "link.quality";
+  | "link.quality"
+  | "tvc.panel";
 
-export type WidgetCategory = "Core" | "Navigation" | "IMU" | "Attitude" | "Viz" | "Flight" | "Safety" | "Sensors" | "Link";
+export type WidgetCategory = "Core" | "Navigation" | "IMU" | "Attitude" | "Viz" | "Flight" | "Safety" | "Sensors" | "Link" | "Control";
 
 export type WidgetView = "card" | "instrument" | "plot";
 
@@ -41,7 +42,7 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 12, h: 10 },
     defaultView: "card",
     views: ["card"],
-    defaultTheme: { accent: "#7aa2ff" },
+    defaultTheme: { accent: "#a2a6ae" },
   },
   {
     id: "altitude.card",
@@ -52,7 +53,7 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 4, h: 6 },
     defaultView: "card",
     views: ["card", "instrument", "plot"],
-    defaultTheme: { accent: "#7aa2ff" },
+    defaultTheme: { accent: "#a2a6ae" },
   },
   {
     id: "velocity.card",
@@ -63,7 +64,7 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 4, h: 6 },
     defaultView: "card",
     views: ["card", "instrument", "plot"],
-    defaultTheme: { accent: "#7aa2ff" },
+    defaultTheme: { accent: "#a2a6ae" },
   },
   {
     id: "battery.card",
@@ -74,7 +75,7 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 4, h: 6 },
     defaultView: "card",
     views: ["card", "instrument", "plot"],
-    defaultTheme: { accent: "#7aa2ff" },
+    defaultTheme: { accent: "#a2a6ae" },
   },
   {
     id: "attitude.card",
@@ -85,7 +86,7 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 6, h: 8 },
     defaultView: "instrument",
     views: ["card", "instrument", "plot"],
-    defaultTheme: { accent: "#7aa2ff" },
+    defaultTheme: { accent: "#a2a6ae" },
   },
   {
     id: "vehicle.3d",
@@ -96,7 +97,7 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 6, h: 8 },
     defaultView: "instrument",
     views: ["instrument"],
-    defaultTheme: { accent: "#7aa2ff" },
+    defaultTheme: { accent: "#a2a6ae" },
   },
   {
     id: "gps.map",
@@ -107,7 +108,7 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 6, h: 8 },
     defaultView: "instrument",
     views: ["card", "instrument"],
-    defaultTheme: { accent: "#7aa2ff" },
+    defaultTheme: { accent: "#a2a6ae" },
   },
   {
     id: "imu.card",
@@ -118,7 +119,7 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 6, h: 6 },
     defaultView: "card",
     views: ["card"],
-    defaultTheme: { accent: "#7aa2ff" },
+    defaultTheme: { accent: "#a2a6ae" },
   },
   {
     id: "flight.summary",
@@ -151,7 +152,7 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 5, h: 7 },
     defaultView: "card",
     views: ["card", "plot"],
-    defaultTheme: { accent: "#57c1ff" },
+    defaultTheme: { accent: "#d8dbe0" },
   },
   {
     id: "checklist.panel",
@@ -184,7 +185,18 @@ export const WIDGETS: WidgetDef[] = [
     defaultSize: { w: 5, h: 7 },
     defaultView: "card",
     views: ["card", "plot"],
-    defaultTheme: { accent: "#57c1ff" },
+    defaultTheme: { accent: "#d8dbe0" },
+  },
+  {
+    id: "tvc.panel",
+    name: "TVC Test",
+    category: "Control",
+    requires: ["tvc_pitch_deg", "tvc_yaw_deg"],
+    hardwareHint: "Gimballed motor mount. Send tvc_pitch_deg / tvc_yaw_deg (commanded); add tvc_pitch_fb_deg / tvc_yaw_fb_deg for servo tracking error.",
+    defaultSize: { w: 6, h: 8 },
+    defaultView: "card",
+    views: ["card"],
+    defaultTheme: { accent: "#d8dbe0" },
   },
 ];
 

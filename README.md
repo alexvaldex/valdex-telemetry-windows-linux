@@ -52,6 +52,12 @@ One JSON object per line (NDJSON), `t_ms` required, everything else optional:
 Common aliases (`alt`, `altitude_ft`, `vz_fps`, `temp_f`, `pressure_hpa`, …)
 map automatically; anything else can be mapped in-app via **Field Map**.
 
+**Thrust vector control** (optional): send `tvc_pitch_deg` / `tvc_yaw_deg` for
+the commanded gimbal angles, plus `tvc_pitch_fb_deg` / `tvc_yaw_fb_deg` for
+servo feedback and `tvc_enabled` (0/1). The **TVC Test** widget plots deflection
+against the mechanical limit and computes RMS tracking error — the number you
+tune a gimbal loop against. Aliases: `gimbal_pitch`, `servo_yaw`, and friends.
+
 Optional wire integrity: append an NMEA-style checksum — `{...}*1A2B` where
 the hex digits are **CRC-16/CCITT-FALSE** over the UTF-8 JSON text before the
 `*`. Corrupt lines are dropped and counted (Link Quality widget). Optional

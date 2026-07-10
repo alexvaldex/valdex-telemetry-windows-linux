@@ -20,7 +20,7 @@ type Track = {
   bearing: number;
 };
 
-const TRACK_COLORS = ["var(--vx-blue-bright)", "var(--vx-caution)", "var(--vx-go)", "#c792ea"];
+const TRACK_COLORS = ["var(--vx-accent-bright)", "var(--vx-caution)", "var(--vx-go)", "#c792ea"];
 
 /**
  * Offline "range map": projects GPS tracks into local meters around the pad
@@ -117,7 +117,7 @@ export function RangeMapWidget(props: { frames: TelemetryFrameV1[]; latest?: Tel
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 14, height: "100%", alignItems: "center" }}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ background: "rgba(4,7,14,0.6)", border: "1px solid var(--vx-line)", borderRadius: 3 }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ background: "rgba(10, 10, 11,0.6)", border: "1px solid var(--vx-line)", borderRadius: 3 }}>
         {/* range rings */}
         {rings.map((r, i) => (
           <circle key={i} cx={c} cy={c} r={r * scale} fill="none" stroke="var(--vx-line)" strokeWidth={1} />
@@ -152,7 +152,7 @@ export function RangeMapWidget(props: { frames: TelemetryFrameV1[]; latest?: Tel
       {multi ? (
         <div style={{ display: "grid", gap: 10, alignContent: "center" }}>
           {model.tracks.map((t) => (
-            <div key={t.label} style={{ border: "1px solid var(--vx-line)", borderRadius: 3, padding: "8px 10px", background: "rgba(10,16,30,0.5)" }}>
+            <div key={t.label} style={{ border: "1px solid var(--vx-line)", borderRadius: 3, padding: "8px 10px", background: "rgba(20, 20, 23,0.5)" }}>
               <div className="vx-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ width: 8, height: 8, borderRadius: "50%", background: t.color, display: "inline-block" }} />
                 {t.label}
@@ -167,7 +167,7 @@ export function RangeMapWidget(props: { frames: TelemetryFrameV1[]; latest?: Tel
                   href={recoveryRouteUrl(model.lat0, model.lon0, t.lastLat, t.lastLon)}
                   target="_blank"
                   rel="noreferrer"
-                  style={{ color: "var(--vx-blue-bright)" }}
+                  style={{ color: "var(--vx-accent-bright)" }}
                   title="Walking directions from the pad to this vehicle (Google Maps)"
                 >
                   Route ↗
@@ -196,7 +196,7 @@ export function RangeMapWidget(props: { frames: TelemetryFrameV1[]; latest?: Tel
               href={recoveryRouteUrl(model.lat0, model.lon0, model.tracks[0].lastLat, model.tracks[0].lastLon)}
               target="_blank"
               rel="noreferrer"
-              style={{ color: "var(--vx-blue-bright)" }}
+              style={{ color: "var(--vx-accent-bright)" }}
               title="Walking directions from the pad to the vehicle (Google Maps)"
             >
               Route ↗

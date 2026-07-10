@@ -68,7 +68,7 @@ function ChecklistPanel() {
         <div
           style={{
             width: `${items.length ? (done / items.length) * 100 : 0}%`, height: "100%",
-            background: allGo ? "var(--vx-go)" : "var(--vx-blue)", transition: "width 0.25s ease",
+            background: allGo ? "var(--vx-go)" : "var(--vx-accent)", transition: "width 0.25s ease",
           }}
         />
       </div>
@@ -79,7 +79,7 @@ function ChecklistPanel() {
             key={item.id}
             style={{
               display: "flex", gap: 10, alignItems: "center", padding: "7px 9px", borderRadius: 3,
-              border: "1px solid var(--vx-line)", background: item.done ? "rgba(36,224,138,0.06)" : "rgba(10,16,30,0.5)",
+              border: "1px solid var(--vx-line)", background: item.done ? "rgba(36,224,138,0.06)" : "rgba(20, 20, 23,0.5)",
               cursor: "pointer", fontSize: 13,
               color: item.done ? "var(--vx-fg-dim)" : "var(--vx-fg)",
               textDecoration: item.done ? "line-through" : "none",
@@ -135,6 +135,8 @@ function loadChecklistDefaults(): ChecklistItem[] {
 import { FlightSummaryWidget } from "./flightSummary";
 import { RangeMapWidget } from "./rangeMap";
 import { PyroPanelWidget } from "./pyroPanel";
+import { TvcPanelWidget } from "./tvcPanel";
+import { tiltDegFromQuat } from "../telemetry/attitude";
 
 
 
@@ -197,7 +199,7 @@ function BigReadout(props: {
             MIN <b style={{ fontFamily: "var(--vx-font-mono)", color: "var(--vx-fg)" }}>{sf(props.stats.min)}</b>
           </span>
           <span style={{ color: "var(--vx-fg-dim)", letterSpacing: "0.12em", textTransform: "uppercase" }}>
-            PK <b style={{ fontFamily: "var(--vx-font-mono)", color: "var(--vx-blue-bright)" }}>{sf(props.stats.max)}</b>
+            PK <b style={{ fontFamily: "var(--vx-font-mono)", color: "var(--vx-accent-bright)" }}>{sf(props.stats.max)}</b>
           </span>
         </div>
       ) : null}
@@ -211,7 +213,7 @@ function GaugeBar(props: { pct: number; accent?: string }) {
   const pct = Math.max(0, Math.min(1, props.pct));
   return (
     <div style={{ height: 10, borderRadius: 2, border: "1px solid var(--vx-line)", background: "rgba(0,0,0,0.35)", overflow: "hidden" }}>
-      <div style={{ width: `${pct * 100}%`, height: "100%", background: props.accent ?? "var(--vx-blue)", boxShadow: "0 0 10px var(--vx-blue-glow)" }} />
+      <div style={{ width: `${pct * 100}%`, height: "100%", background: props.accent ?? "var(--vx-accent)", boxShadow: "0 0 10px var(--vx-accent-glow)" }} />
     </div>
   );
 }
@@ -414,7 +416,7 @@ function PlotLine(props: {
   return (
     <div
       style={{
-        borderRadius: 3, border: "1px solid var(--vx-line)", background: "rgba(4,7,14,0.6)", padding: 10,
+        borderRadius: 3, border: "1px solid var(--vx-line)", background: "rgba(10, 10, 11,0.6)", padding: 10,
         ...(props.fill ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" } : {}),
       }}
     >
@@ -471,7 +473,7 @@ function PlotLine(props: {
           <path
             d={view?.path ?? ""}
             fill="none"
-            stroke={props.color ?? "var(--vx-blue-bright)"}
+            stroke={props.color ?? "var(--vx-accent-bright)"}
             strokeWidth={8}
             strokeLinejoin="round"
             strokeLinecap="round"
@@ -501,7 +503,7 @@ function PlotLine(props: {
                 position: "absolute", top: 2,
                 left: m.frac > 0.85 ? "auto" : 3, right: m.frac > 0.85 ? 3 : "auto",
                 fontSize: 9, letterSpacing: "0.08em", fontFamily: "var(--vx-font-mono)",
-                color: "var(--vx-caution)", background: "rgba(4,7,14,0.75)",
+                color: "var(--vx-caution)", background: "rgba(10, 10, 11,0.75)",
                 padding: "1px 3px", borderRadius: 2, whiteSpace: "nowrap",
               }}
             >
@@ -512,13 +514,13 @@ function PlotLine(props: {
 
         {/* Hover crosshair + readout */}
         {hover && view && !dragRef.current?.moved && (
-          <div style={{ position: "absolute", top: 0, bottom: 0, left: `${(hover.frac * 100).toFixed(2)}%`, borderLeft: "1px solid rgba(120,175,255,0.55)", pointerEvents: "none" }}>
+          <div style={{ position: "absolute", top: 0, bottom: 0, left: `${(hover.frac * 100).toFixed(2)}%`, borderLeft: "1px solid rgba(198, 201, 207,0.55)", pointerEvents: "none" }}>
             <span
               style={{
                 position: "absolute", bottom: 2,
                 left: hover.frac > 0.7 ? "auto" : 5, right: hover.frac > 0.7 ? 5 : "auto",
                 fontSize: 10, fontFamily: "var(--vx-font-mono)",
-                color: "var(--vx-fg)", background: "rgba(4,7,14,0.9)",
+                color: "var(--vx-fg)", background: "rgba(10, 10, 11,0.9)",
                 border: "1px solid var(--vx-line-strong)",
                 padding: "2px 6px", borderRadius: 2, whiteSpace: "nowrap",
               }}
@@ -536,14 +538,9 @@ function PlotLine(props: {
   );
 }
 
-/** Off-vertical tilt in degrees: angle between the body long axis (+Y) and
-    world up. 0° = pointing straight up. */
-export function tiltDegFromQuat(qw?: number, qx?: number, qy?: number, qz?: number): number | null {
-  if (![qw, qx, qy, qz].every((n) => typeof n === "number" && Number.isFinite(n))) return null;
-  const x = qx as number, z = qz as number;
-  const upY = 1 - 2 * (x * x + z * z); // Y component of the rotated body-Y axis
-  return (Math.acos(Math.max(-1, Math.min(1, upY))) * 180) / Math.PI;
-}
+/** Re-exported so existing importers (and the test suite) keep working; the
+    implementation lives in telemetry/attitude.ts to avoid an import cycle. */
+export { tiltDegFromQuat };
 
 /** --------- quaternion -> euler --------- */
 function quatToEuler(qw?: number, qx?: number, qy?: number, qz?: number) {
@@ -600,7 +597,7 @@ function ArtificialHorizon(props: { rollDeg?: number; pitchDeg?: number }) {
         <g clipPath="url(#clip)">
           <g transform={`translate(${cx},${cy}) rotate(${roll}) translate(${-cx},${-cy})`}>
             {/* sky */}
-            <rect x="0" y="0" width="320" height="240" fill="rgba(90,160,255,0.25)" />
+            <rect x="0" y="0" width="320" height="240" fill="rgba(168, 171, 177,0.25)" />
             {/* ground */}
             <rect x="0" y={cy + pitchPx} width="320" height="240" fill="rgba(255,190,90,0.22)" />
             {/* horizon line */}
@@ -721,7 +718,7 @@ export function renderWidget(args: {
       const value = typeof v === "number" ? v : NaN;
       const max = unitSystem === "imperial" ? 2000 : 600;
       const pct = Number.isFinite(value) ? Math.max(0, Math.min(1, Math.abs(value) / max)) : 0;
-      const accent = Number.isFinite(value) && value < 0 ? "var(--vx-caution)" : "var(--vx-blue-bright)";
+      const accent = Number.isFinite(value) && value < 0 ? "var(--vx-caution)" : "var(--vx-accent-bright)";
       return (
         <div style={{ display: "grid", gap: 12, alignContent: "center", height: "100%" }}>
           <BigReadout value={fmt(v, 1)} unit={u} accent={accent} />
@@ -745,7 +742,7 @@ export function renderWidget(args: {
         sub={
           mach !== undefined && mach >= 0.3 ? (
             <span>
-              {dirText} · <b style={{ color: mach >= 1 ? "var(--vx-caution)" : "var(--vx-blue-bright)", fontFamily: "var(--vx-font-mono)" }}>MACH {mach.toFixed(2)}</b>
+              {dirText} · <b style={{ color: mach >= 1 ? "var(--vx-caution)" : "var(--vx-accent-bright)", fontFamily: "var(--vx-font-mono)" }}>MACH {mach.toFixed(2)}</b>
             </span>
           ) : (
             dirText
@@ -912,6 +909,10 @@ export function renderWidget(args: {
     return <FlightSummaryWidget frames={frames} unitSystem={unitSystem} />;
   }
 
+  if (widgetId === "tvc.panel") {
+    return <TvcPanelWidget frames={frames} latest={latest} />;
+  }
+
   if (widgetId === "pyro.panel") {
     return <PyroPanelWidget frames={frames} latest={latest} />;
   }
@@ -946,7 +947,7 @@ export function renderWidget(args: {
         : undefined;
     return (
       <div style={{ display: "grid", gap: 12, height: "100%", alignContent: "start" }}>
-        <BigReadout value={accMag !== undefined ? accMag.toFixed(2) : "—"} unit="g total" accent="var(--vx-blue-bright)" />
+        <BigReadout value={accMag !== undefined ? accMag.toFixed(2) : "—"} unit="g total" accent="var(--vx-accent-bright)" />
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
           <StatTile label="AX" value={fmt(latest?.ax, 2)} />
           <StatTile label="AY" value={fmt(latest?.ay, 2)} />
@@ -980,7 +981,7 @@ export function renderWidget(args: {
 
     return (
       <div style={{ display: "grid", gap: 12, height: "100%", alignContent: "start" }}>
-        <BigReadout value={tVal !== undefined ? tVal.toFixed(1) : "—"} unit={tUnit} accent="var(--vx-blue-bright)" />
+        <BigReadout value={tVal !== undefined ? tVal.toFixed(1) : "—"} unit={tUnit} accent="var(--vx-accent-bright)" />
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
           <StatTile label="PRESS hPa" value={hpa !== undefined ? hpa.toFixed(1) : "—"} />
           <StatTile label="PRESS psi" value={psi !== undefined ? psi.toFixed(2) : "—"} />
@@ -1023,7 +1024,7 @@ export function renderWidget(args: {
           sub={
             <span>
               SPIN <b className="vx-num" style={{ color: "var(--vx-fg)" }}>{spin !== undefined ? `${spin.toFixed(0)}°/s` : "—"}</b>
-              {Number.isFinite(maxTilt) ? <> · MAX <b className="vx-num" style={{ color: "var(--vx-blue-bright)" }}>{maxTilt.toFixed(1)}°</b></> : null}
+              {Number.isFinite(maxTilt) ? <> · MAX <b className="vx-num" style={{ color: "var(--vx-accent-bright)" }}>{maxTilt.toFixed(1)}°</b></> : null}
             </span>
           }
         />
@@ -1117,7 +1118,7 @@ export function renderWidget(args: {
 
 function StatTile(props: { label: string; value: string; unit?: string; accent?: string }) {
   return (
-    <div style={{ border: "1px solid var(--vx-line)", borderRadius: 3, background: "rgba(10,16,30,0.5)", padding: "8px 10px", display: "grid", gap: 4 }}>
+    <div style={{ border: "1px solid var(--vx-line)", borderRadius: 3, background: "rgba(20, 20, 23,0.5)", padding: "8px 10px", display: "grid", gap: 4 }}>
       <span className="vx-label" style={{ fontSize: 9 }}>{props.label}</span>
       <span style={{ fontFamily: "var(--vx-font-mono)", fontVariantNumeric: "tabular-nums", fontWeight: 700, fontSize: 18, color: props.accent ?? "var(--vx-fg)" }}>
         {props.value}

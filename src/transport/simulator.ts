@@ -72,6 +72,8 @@ export class SimulatorConnection implements Connection {
   private mainCont: 0 | 1 = 1;
   private drogueEventSent = false;
   private spinDeg = 0; // accumulated roll about the long axis
+  private tvcPitchFb = 0; // TVC servo feedback (lags the command)
+  private tvcYawFb = 0;
 
   // Per-stream packet sequence counters (~1.5% simulated drop rate).
   private seqSust = 0;
@@ -118,6 +120,8 @@ export class SimulatorConnection implements Connection {
     this.mainCont = 1;
     this.drogueEventSent = false;
     this.spinDeg = 0;
+    this.tvcPitchFb = 0;
+    this.tvcYawFb = 0;
     this.booster = null;
     this.seqSust = 0;
     this.seqBstr = 0;
@@ -324,6 +328,28 @@ export class SimulatorConnection implements Connection {
     const q = qMul(qAxis(Math.cos(axR), 0, Math.sin(axR), tiltDeg), qAxis(0, 1, 0, this.spinDeg % 360));
     const r4 = (n: number) => Math.round(n * 10000) / 10000;
 
+    /* --- Thrust vector control -----------------------------------------
+       The gimbal only has authority while the motor is burning. A simple
+       proportional law drives the commanded angle against the current tilt
+       error; the servos track it through a first-order lag, which is what
+       produces the command-vs-feedback gap the TVC widget plots. */
+    const tvcActive = this.phase === "boost";
+    const TVC_LIMIT = 10;       // matches the widget's mechanical limit
+    const TVC_KP = 0.55;        // proportional gain
+    const TVC_TAU = 0.05;       // servo time constant, seconds
+    const clampTvc = (d: number) => Math.max(-TVC_LIMIT, Math.min(TVC_LIMIT, d));
+
+    let tvcPitchCmd = 0;
+    let tvcYawCmd = 0;
+    if (tvcActive) {
+      // Decompose the tilt vector onto the pitch/yaw gimbal axes, then oppose it.
+      tvcPitchCmd = clampTvc(-TVC_KP * tiltDeg * Math.cos(axR) + (Math.random() - 0.5) * 0.15);
+      tvcYawCmd = clampTvc(-TVC_KP * tiltDeg * Math.sin(axR) + (Math.random() - 0.5) * 0.15);
+    }
+    const lag = 1 - Math.exp(-dtSec / TVC_TAU);
+    this.tvcPitchFb += (tvcPitchCmd - this.tvcPitchFb) * lag;
+    this.tvcYawFb += (tvcYawCmd - this.tvcYawFb) * lag;
+
     this.seqSust += Math.random() < 0.015 ? 2 : 1; // occasional dropped packet
     const frame: Record<string, unknown> = {
       v: 1,
@@ -355,6 +381,11 @@ export class SimulatorConnection implements Connection {
             (Math.random() - 0.5) * 0.06) * 100
         ) / 100,
       q_w: r4(q.w), q_x: r4(q.x), q_y: r4(q.y), q_z: r4(q.z),
+      tvc_enabled: tvcActive ? 1 : 0,
+      tvc_pitch_deg: Math.round(tvcPitchCmd * 100) / 100,
+      tvc_yaw_deg: Math.round(tvcYawCmd * 100) / 100,
+      tvc_pitch_fb_deg: Math.round(this.tvcPitchFb * 100) / 100,
+      tvc_yaw_fb_deg: Math.round(this.tvcYawFb * 100) / 100,
       pyro_drogue_cont: this.drogueCont,
       pyro_main_cont: this.mainCont,
     };
