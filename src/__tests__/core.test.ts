@@ -373,3 +373,47 @@ describe("sensor fusion + event gating", () => {
     expect(Math.abs(fe.baselineAlt)).toBeLessThan(3); // near 0, not a single noisy sample
   });
 });
+
+describe("device profiles (multi-format ingest)", () => {
+  it("auto-maps a CSV header and parses data rows", async () => {
+    const { setDeviceProfile, parseLine } = await import("../telemetry/deviceProfiles");
+    setDeviceProfile("csv");
+    // Header row is learned, returns null (no frame).
+    expect(parseLine("Time_ms,Altitude (ft),Vel_mps,Batt V,Lat,Lon")).toBeNull();
+    const obj = parseLine("1500,328.084,42.5,7.9,28.6,-80.6")!;
+    expect(obj).not.toBeNull();
+    expect(obj.t_ms).toBe(1500);
+    expect(obj.alt_ft).toBeCloseTo(328.084, 2); // "ft" header → alt_ft alias
+    expect(obj.vel_mps).toBe(42.5);
+    expect(obj.batt_v).toBe(7.9);
+    expect(obj.lat).toBe(28.6);
+    setDeviceProfile("vx");
+  });
+
+  it("CSV feeds the normal ingest → normalize pipeline (ft → m)", async () => {
+    const { setDeviceProfile } = await import("../telemetry/deviceProfiles");
+    setDeviceProfile("csv");
+    let st = initialTelemetryState();
+    ingestLineInPlace(st, "t_ms,alt_ft"); // header
+    ingestLineInPlace(st, "500,328.084"); // 328.084 ft = 100 m
+    expect(st.frames.length).toBe(1);
+    expect(st.latest?.alt_m).toBeCloseTo(100, 2);
+    setDeviceProfile("vx");
+  });
+
+  it("parses key=value lines", async () => {
+    const { setDeviceProfile, parseLine } = await import("../telemetry/deviceProfiles");
+    setDeviceProfile("keyval");
+    const obj = parseLine("alt_m=123.4 vel_mps=56 batt_v=7.8")!;
+    expect(obj.alt_m).toBe(123.4);
+    expect(obj.vel_mps).toBe(56);
+    setDeviceProfile("vx");
+  });
+
+  it("auto profile still parses NDJSON", async () => {
+    const { setDeviceProfile, parseLine } = await import("../telemetry/deviceProfiles");
+    setDeviceProfile("vx");
+    const obj = parseLine('{"v":1,"t_ms":9,"alt_m":10}')!;
+    expect(obj.alt_m).toBe(10);
+  });
+});

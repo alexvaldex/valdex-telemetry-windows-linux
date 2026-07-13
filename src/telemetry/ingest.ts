@@ -4,6 +4,7 @@ import { isTelemetryFrameV1 } from "./validate";
 import { applyFieldMap, trackUnknownKeys } from "./fieldMap";
 import { verifyAndStrip } from "./crc";
 import { latchPadOrigin } from "./padOrigin";
+import { parseLine } from "./deviceProfiles";
 
 /** Wire-integrity counters for the current session (shown in Link Quality). */
 let crcOk = 0;
@@ -33,18 +34,16 @@ export function ingestLineInPlace(state: TelemetryState, line: string): void {
     return;
   }
 
-  let raw: unknown;
-  try {
-    raw = JSON.parse(payload);
-  } catch {
-    return;
-  }
+  // Parse per the active device profile (NDJSON / CSV / key=value / auto).
+  // Header rows and unparseable lines return null and are skipped.
+  const parsed = parseLine(payload);
+  if (parsed === null) return;
 
   // User-defined firmware field remapping, then record unmapped keys for the UI.
-  raw = applyFieldMap(raw as Record<string, unknown>);
-  trackUnknownKeys(raw as Record<string, unknown>);
+  const raw = applyFieldMap(parsed);
+  trackUnknownKeys(raw);
 
-  const frame = normalizeTelemetryFrame(raw as Record<string, unknown>, Date.now());
+  const frame = normalizeTelemetryFrame(raw, Date.now());
   if (!frame || !isTelemetryFrameV1(frame)) return;
 
   state.frames.push(frame);

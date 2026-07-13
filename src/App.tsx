@@ -35,6 +35,7 @@ import {
 } from "./telemetry/vehicleStore";
 import type { Model3D, UpAxis } from "./widgets/rocketModel";
 import { getFieldMap, saveFieldMap, getUnknownKeys, V1_TARGET_KEYS, type FieldMapping } from "./telemetry/fieldMap";
+import { DEVICE_PROFILES, loadDeviceProfile, setDeviceProfile } from "./telemetry/deviceProfiles";
 import { speak } from "./audio/voice";
 import { loadAlertRules, saveAlertRules, ruleFires, RULE_FIELDS, type AlertRule } from "./telemetry/alertRules";
 import { setGhost } from "./telemetry/ghost";
@@ -1053,6 +1054,9 @@ export default function App() {
 
   /** Export modal — one entry point, asks which file format to write. */
   const [exportOpen, setExportOpen] = useState(false);
+
+  /** Active device profile (data-format parser). Restored from storage once. */
+  const [deviceProfile, setDeviceProfileState] = useState<string>(() => loadDeviceProfile());
 
   /** Mission overview: full launch-profile model, or the simple bar timeline. */
   const [missionView, setMissionView] = useState<"model" | "timeline">(() => {
@@ -3031,6 +3035,19 @@ ${trkpts}
             <option value="simulator">Simulator</option>
             <option value="serial">Serial{isTauri() ? " (native)" : isWebSerialSupported() ? "" : " (unsupported browser)"}</option>
           </select>
+
+          {transportKind === "serial" && (
+            <select
+              className="vx-select"
+              value={deviceProfile}
+              onChange={(e) => { setDeviceProfile(e.target.value); setDeviceProfileState(e.target.value); }}
+              title="Device / data format — how VX parses incoming lines"
+            >
+              {DEVICE_PROFILES.map((p) => (
+                <option key={p.id} value={p.id} title={p.note}>{p.name}</option>
+              ))}
+            </select>
+          )}
 
           {transportKind === "simulator" && (
             <button
