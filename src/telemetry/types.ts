@@ -48,6 +48,17 @@ export type TelemetryFrameV1 = {
   tvc_yaw_fb_deg?: number;
   tvc_enabled?: 0 | 1;
 
+  // Canard fin control (Tier 3) — forward steering fins, typically 4 in an
+  // X or + arrangement. Per-fin deflection in degrees, plus the roll-rate the
+  // controller is trying to hold (deg/s) and its commanded roll effort.
+  canard_1_deg?: number;
+  canard_2_deg?: number;
+  canard_3_deg?: number;
+  canard_4_deg?: number;
+  canard_roll_cmd_deg?: number; // commanded roll effort (−1..1 → deg), optional
+  roll_rate_dps?: number;       // measured roll rate the canards are damping
+  canard_enabled?: 0 | 1;
+
   // Events / pyro / states (Tier 3)
   event?: string;
   pyro_main_cont?: 0 | 1;

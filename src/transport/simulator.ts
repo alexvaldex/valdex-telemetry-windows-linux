@@ -74,6 +74,7 @@ export class SimulatorConnection implements Connection {
   private spinDeg = 0; // accumulated roll about the long axis
   private tvcPitchFb = 0; // TVC servo feedback (lags the command)
   private tvcYawFb = 0;
+  private rollRateDps = 0; // roll rate the canards are damping
 
   // Per-stream packet sequence counters (~1.5% simulated drop rate).
   private seqSust = 0;
@@ -122,6 +123,7 @@ export class SimulatorConnection implements Connection {
     this.spinDeg = 0;
     this.tvcPitchFb = 0;
     this.tvcYawFb = 0;
+    this.rollRateDps = 0;
     this.booster = null;
     this.seqSust = 0;
     this.seqBstr = 0;
@@ -350,6 +352,23 @@ export class SimulatorConnection implements Connection {
     this.tvcPitchFb += (tvcPitchCmd - this.tvcPitchFb) * lag;
     this.tvcYawFb += (tvcYawCmd - this.tvcYawFb) * lag;
 
+    /* --- Canard fins ---------------------------------------------------
+       Active while there's airspeed (boost + coast). The fins hold roll: they
+       deflect against the current roll rate, so as they work the roll rate
+       decays. Fins 1/3 and 2/4 act as opposing pairs for roll authority. */
+    const canardActive = this.phase === "boost" || this.phase === "coast";
+    const FIN_LIMIT = 15;
+    const clampFin = (d: number) => Math.max(-FIN_LIMIT, Math.min(FIN_LIMIT, d));
+    let finDefl = 0;
+    if (canardActive) {
+      // Damp the roll: deflection opposes roll rate (deg/s) with a small gain.
+      finDefl = clampFin(-0.04 * this.rollRateDps + (Math.random() - 0.5) * 0.6);
+      // Fins bleed the roll rate down over time (what the controller achieves).
+      this.rollRateDps += (-this.rollRateDps * 0.9 + spinRateDps * 4) * dtSec;
+    } else {
+      this.rollRateDps = spinRateDps; // uncontrolled: just the body spin rate
+    }
+
     this.seqSust += Math.random() < 0.015 ? 2 : 1; // occasional dropped packet
     const frame: Record<string, unknown> = {
       v: 1,
@@ -386,6 +405,12 @@ export class SimulatorConnection implements Connection {
       tvc_yaw_deg: Math.round(tvcYawCmd * 100) / 100,
       tvc_pitch_fb_deg: Math.round(this.tvcPitchFb * 100) / 100,
       tvc_yaw_fb_deg: Math.round(this.tvcYawFb * 100) / 100,
+      canard_enabled: canardActive ? 1 : 0,
+      canard_1_deg: Math.round(finDefl * 100) / 100,
+      canard_2_deg: Math.round(-finDefl * 100) / 100,
+      canard_3_deg: Math.round(finDefl * 100) / 100,
+      canard_4_deg: Math.round(-finDefl * 100) / 100,
+      roll_rate_dps: Math.round(this.rollRateDps * 10) / 10,
       pyro_drogue_cont: this.drogueCont,
       pyro_main_cont: this.mainCont,
     };

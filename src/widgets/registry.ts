@@ -14,7 +14,8 @@ export type WidgetId =
   | "checklist.panel"
   | "tilt.spin"
   | "link.quality"
-  | "tvc.panel";
+  | "tvc.panel"
+  | "canard.panel";
 
 export type WidgetCategory = "Core" | "Navigation" | "IMU" | "Attitude" | "Viz" | "Flight" | "Safety" | "Sensors" | "Link" | "Control";
 
@@ -193,6 +194,17 @@ export const WIDGETS: WidgetDef[] = [
     category: "Control",
     requires: ["tvc_pitch_deg", "tvc_yaw_deg"],
     hardwareHint: "Gimballed motor mount. Send tvc_pitch_deg / tvc_yaw_deg (commanded); add tvc_pitch_fb_deg / tvc_yaw_fb_deg for servo tracking error.",
+    defaultSize: { w: 6, h: 8 },
+    defaultView: "card",
+    views: ["card"],
+    defaultTheme: { accent: "#d8dbe0" },
+  },
+  {
+    id: "canard.panel",
+    name: "Canard Fins",
+    category: "Control",
+    requires: ["canard_1_deg"],
+    hardwareHint: "Forward steering fins on servos. Send canard_1_deg..canard_4_deg (per-fin deflection) and roll_rate_dps for the roll rate being damped.",
     defaultSize: { w: 6, h: 8 },
     defaultView: "card",
     views: ["card"],

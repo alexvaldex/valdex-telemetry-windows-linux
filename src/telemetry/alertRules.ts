@@ -27,6 +27,7 @@ export const RULE_FIELDS = [
   "gps_sats", "gps_alt_m",
   "temp_c", "pressure_pa", "humidity_pct",
   "tvc_pitch_deg", "tvc_yaw_deg", "tvc_pitch_fb_deg", "tvc_yaw_fb_deg",
+  "canard_1_deg", "canard_2_deg", "canard_3_deg", "canard_4_deg", "roll_rate_dps",
 ] as const;
 
 const KEY = "vx.alertRules";

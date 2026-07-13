@@ -58,6 +58,15 @@ servo feedback and `tvc_enabled` (0/1). The **TVC Test** widget plots deflection
 against the mechanical limit and computes RMS tracking error — the number you
 tune a gimbal loop against. Aliases: `gimbal_pitch`, `servo_yaw`, and friends.
 
+**Canard fins** (optional): send `canard_1_deg`..`canard_4_deg` for per-fin
+deflection and `roll_rate_dps` for the roll rate the fins are damping (plus
+optional `canard_enabled`). The **Canard Fins** widget shows the fins working
+from a nose-on view and flags when roll authority is lost. Aliases: `fin1`..
+`fin4`, `roll_rate`.
+
+Every widget has an **info (i) button** with wiring and troubleshooting help,
+and a Learn-more link you point at your own tutorials site (Settings → Tools).
+
 Optional wire integrity: append an NMEA-style checksum — `{...}*1A2B` where
 the hex digits are **CRC-16/CCITT-FALSE** over the UTF-8 JSON text before the
 `*`. Corrupt lines are dropped and counted (Link Quality widget). Optional

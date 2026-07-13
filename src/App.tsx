@@ -7,6 +7,7 @@ import { getPadOrigin } from "./telemetry/padOrigin";
 import { tiltDegFromQuat } from "./telemetry/attitude";
 
 import { WIDGETS, WIDGETS_BY_CATEGORY, type WidgetId } from "./widgets/registry";
+import { WIDGET_HELP, learnMoreUrl } from "./widgets/widgetHelp";
 import type { UnitSystem } from "./units";
 import { renderWidget } from "./widgets/renderers";
 
@@ -28,6 +29,8 @@ import {
   deleteVehicleModel,
   type RocketConfig,
   type StageRole,
+  VEHICLE_CHANGED_EVENT,
+  notifyVehicleChanged,
 } from "./telemetry/vehicleStore";
 import type { Model3D, UpAxis } from "./widgets/rocketModel";
 import { getFieldMap, saveFieldMap, getUnknownKeys, V1_TARGET_KEYS, type FieldMapping } from "./telemetry/fieldMap";
@@ -381,17 +384,35 @@ function MissionLogo() {
 /**
  * Mission Model — a live launch-profile view.
  *
- * Replaces the old flat timeline strip. The vehicle is drawn rising from the
- * pad coordinates (the GPS origin latched at first fix, or the Sim Setup pad),
- * positioned by real telemetry: altitude on the vertical axis, GPS downrange
- * distance on the horizontal, body tilt from the attitude quaternion.
+ * The vehicle is drawn rising from the pad coordinates (the GPS origin latched
+ * at first fix, or the Sim Setup pad), positioned by real telemetry: altitude
+ * on the vertical axis, GPS downrange on the horizontal. The vehicle points
+ * along its own trajectory, so it noses over at apogee and comes down the way
+ * a real one does — driven by the flight path, not a clamped tilt angle.
+ *
+ * If the user has captured a 2D side profile of their CAD (Vehicle setup), it's
+ * used as the vehicle marker; otherwise a generic rocket glyph is drawn.
  *
  * Deliberately SVG rather than three.js: this panel is always on screen, and
- * the 3D CAD viewer is a ~950 KB lazy chunk. A vertical-profile projection also
- * reads better than a perspective camera for judging a trajectory.
- *
- * The event rail underneath is kept — it's still how you jump to an event.
+ * the 3D CAD viewer is a ~950 KB lazy chunk.
  */
+
+/** Simple centered moving average — kills GPS jitter in the downrange track
+    without lagging the path noticeably at these sample rates. */
+function smoothSeries(vals: number[], half = 2): number[] {
+  if (vals.length < 3) return vals.slice();
+  const out: number[] = [];
+  for (let i = 0; i < vals.length; i++) {
+    let sum = 0, n = 0;
+    for (let k = -half; k <= half; k++) {
+      const j = i + k;
+      if (j >= 0 && j < vals.length) { sum += vals[j]; n++; }
+    }
+    out.push(sum / n);
+  }
+  return out;
+}
+
 function MissionModel(props: {
   events: DerivedEvent[];
   frames: TelemetryFrameV1[];
@@ -405,6 +426,14 @@ function MissionModel(props: {
 
   const pad = getPadOrigin();
 
+  // Captured CAD side profile (data URL) + aspect ratio, refreshed live.
+  const [sideImg, setSideImg] = useState<{ url: string; ar: number } | null>(() => readSideProfile());
+  useEffect(() => {
+    const h = () => setSideImg(readSideProfile());
+    window.addEventListener(VEHICLE_CHANGED_EVENT, h);
+    return () => window.removeEventListener(VEHICLE_CHANGED_EVENT, h);
+  }, []);
+
   /** Local-tangent-plane offset (meters east/north) of a fix from the pad. */
   const offsetM = (lat: number, lon: number) => {
     if (!pad) return { e: 0, n: 0 };
@@ -415,9 +444,9 @@ function MissionModel(props: {
     };
   };
 
-  /** Trajectory in (downrange, altitude) meters. Downrange is signed by the
-      east component so the vehicle visibly leans the way the wind pushes it. */
-  const track = frames
+  /** Raw trajectory in (downrange, altitude) meters. Downrange is signed by the
+      east component so the vehicle leans the way the wind actually pushes it. */
+  const raw = frames
     .filter((f) => typeof f.alt_m === "number")
     .map((f) => {
       let downrange = 0;
@@ -427,6 +456,12 @@ function MissionModel(props: {
       }
       return { x: downrange, y: f.alt_m as number, t: f.t_ms };
     });
+
+  // Smooth the GPS-derived downrange (and lightly the baro altitude) so the
+  // path reads as a clean arc instead of a jitter squiggle.
+  const smX = smoothSeries(raw.map((p) => p.x), 3);
+  const smY = smoothSeries(raw.map((p) => p.y), 1);
+  const track = raw.map((p, i) => ({ x: smX[i], y: smY[i], t: p.t }));
 
   const altM = typeof latest?.alt_m === "number" ? latest.alt_m : 0;
   const tilt = tiltDegFromQuat(latest?.q_w, latest?.q_x, latest?.q_y, latest?.q_z);
@@ -449,10 +484,27 @@ function MissionModel(props: {
   const sy = (ym: number) => GROUND_Y - (ym / (maxAlt * 1.15)) * (GROUND_Y - TOP_Y);
 
   const poly = track.map((p) => `${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ");
-  const cur = { x: sx(track.length ? track[track.length - 1].x : 0), y: sy(altM) };
+  const last = track.length ? track[track.length - 1] : { x: 0, y: 0, t: 0 };
+  const cur = { x: sx(last.x), y: sy(altM) };
 
-  // The rocket leans by its actual tilt, away from the pad.
-  const leanDeg = tilt !== null ? Math.max(-60, Math.min(60, tilt)) * (downrangeM >= 0 ? 1 : -1) : 0;
+  /* Heading — point the vehicle along its own path (screen space), so it noses
+     over at apogee and descends correctly. Uses a short look-back for a stable
+     vector; falls back to nose-up on the pad or when barely moving. Vertical
+     velocity sign disambiguates straight-up vs straight-down. */
+  let headingDeg = 0;
+  if (track.length >= 2) {
+    const n = track.length;
+    const back = track[Math.max(0, n - 6)];
+    const dxs = sx(last.x) - sx(back.x);
+    const dys = sy(last.y) - sy(back.y);
+    const speed = Math.hypot(dxs, dys);
+    const vel = typeof latest?.vel_mps === "number" ? latest.vel_mps : (last.y - back.y);
+    if (speed > 2) {
+      headingDeg = (Math.atan2(dxs, -dys) * 180) / Math.PI;
+    } else if (vel < -0.5) {
+      headingDeg = 180; // descending slowly / under chute — nose down
+    }
+  }
 
   const relLabel = (t: number) => {
     if (t0base === undefined) return "";
@@ -462,6 +514,10 @@ function MissionModel(props: {
 
   const apogee = events.find((e) => e.id === "APOGEE");
   const apogeePt = apogee ? track.find((p) => p.t >= apogee.t_ms) : undefined;
+
+  // Vehicle glyph size (viewBox units). Image height fixed; width by aspect.
+  const IMG_H = 30;
+  const IMG_W = sideImg ? Math.max(6, IMG_H * sideImg.ar) : 0;
 
   return (
     <div className="vx-model">
@@ -494,7 +550,7 @@ function MissionModel(props: {
           {pad ? `${pad.lat.toFixed(5)}, ${pad.lon.toFixed(5)}` : "PAD — awaiting GPS fix"}
         </text>
 
-        {track.length > 1 && <polyline points={poly} fill="none" stroke="var(--vx-accent)" strokeWidth="1.4" opacity="0.75" />}
+        {track.length > 1 && <polyline points={poly} fill="none" stroke="var(--vx-accent)" strokeWidth="1.4" opacity="0.75" strokeLinejoin="round" strokeLinecap="round" />}
 
         {apogeePt && (
           <g>
@@ -505,12 +561,25 @@ function MissionModel(props: {
           </g>
         )}
 
-        {/* Vehicle — leans by its measured tilt */}
-        <g transform={`translate(${cur.x} ${cur.y}) rotate(${leanDeg})`}>
-          <polygon points="0,-11 3.4,-3 3.4,7 -3.4,7 -3.4,-3" fill="var(--vx-accent-bright)" />
-          <polygon points="-3.4,7 -6.6,11 -3.4,2" fill="var(--vx-mark-lift)" />
-          <polygon points="3.4,7 6.6,11 3.4,2" fill="var(--vx-mark-lift)" />
-          {props.phase === "BOOST" && <polygon points="-2.4,8 2.4,8 0,19" fill="var(--vx-caution)" opacity="0.9" />}
+        {/* Vehicle — points along its trajectory (nose over at apogee) */}
+        <g transform={`translate(${cur.x} ${cur.y}) rotate(${headingDeg})`}>
+          {sideImg ? (
+            <image
+              href={sideImg.url}
+              x={-IMG_W / 2}
+              y={-IMG_H / 2}
+              width={IMG_W}
+              height={IMG_H}
+              preserveAspectRatio="xMidYMid meet"
+            />
+          ) : (
+            <>
+              <polygon points="0,-11 3.4,-3 3.4,7 -3.4,7 -3.4,-3" fill="var(--vx-accent-bright)" />
+              <polygon points="-3.4,7 -6.6,11 -3.4,2" fill="var(--vx-mark-lift)" />
+              <polygon points="3.4,7 6.6,11 3.4,2" fill="var(--vx-mark-lift)" />
+              {props.phase === "BOOST" && <polygon points="-2.4,8 2.4,8 0,19" fill="var(--vx-caution)" opacity="0.9" />}
+            </>
+          )}
         </g>
       </svg>
 
@@ -531,6 +600,82 @@ function MissionModel(props: {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Read the captured CAD side profile from localStorage (url + aspect ratio). */
+function readSideProfile(): { url: string; ar: number } | null {
+  try {
+    const url = localStorage.getItem("vx.vehicleSideImage");
+    if (!url) return null;
+    const ar = Number(localStorage.getItem("vx.vehicleSideImageAR")) || 0.4;
+    return { url, ar };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Mission Timeline — the simple bar variant. A single horizontal rail with
+ * event ticks; no trajectory. Chosen in Settings for users who want the
+ * classic compact strip instead of the launch-profile model.
+ */
+function MissionTimelineBar(props: {
+  events: DerivedEvent[];
+  currentTms: number;
+  onJump: (id: DerivedEvent["id"]) => void;
+}) {
+  const { events } = props;
+  const t0base = events.find((e) => e.id === "LIFTOFF")?.t_ms;
+
+  if (!events.length) {
+    return (
+      <div className="vx-timeline">
+        <div className="vx-label" style={{ position: "absolute", top: 8, left: 16 }}>Mission Timeline</div>
+        <div style={{ textAlign: "center", color: "var(--vx-fg-faint)", fontSize: 12, letterSpacing: "0.14em" }}>AWAITING LIFTOFF</div>
+      </div>
+    );
+  }
+
+  const ts = events.map((e) => e.t_ms);
+  const tStart = Math.min(...ts, props.currentTms);
+  const tEnd = Math.max(...ts, props.currentTms);
+  const span = tEnd - tStart || 1;
+  const pos = (t: number) => Math.max(0, Math.min(100, ((t - tStart) / span) * 100));
+  const nowPct = pos(props.currentTms);
+
+  const relLabel = (t: number) => {
+    if (t0base === undefined) return "";
+    const s = (t - t0base) / 1000;
+    return `T${s >= 0 ? "+" : "−"}${Math.abs(s).toFixed(0)}s`;
+  };
+
+  return (
+    <div className="vx-timeline">
+      <div className="vx-label" style={{ position: "absolute", top: 8, left: 16 }}>Mission Timeline</div>
+      <div className="vx-timeline-rail">
+        <div className="vx-timeline-fill" style={{ width: `${nowPct}%` }} />
+        <div className="vx-timeline-now" style={{ left: `${nowPct}%` }} />
+        {events.map((e, i) => {
+          const reached = e.t_ms <= props.currentTms;
+          const above = i % 2 === 0;
+          return (
+            <button
+              key={e.id}
+              className={`vx-tl-event ${reached ? "reached" : ""}`}
+              style={{ left: `${pos(e.t_ms)}%`, top: -4 }}
+              onClick={() => props.onJump(e.id)}
+              title={`${e.label} — jump to event`}
+            >
+              <span className="vx-tl-tick" />
+              <span className={`vx-tl-lbl ${above ? "above" : "below"}`}>
+                {e.id} <span className="vx-tl-time">{relLabel(e.t_ms)}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -907,6 +1052,26 @@ export default function App() {
 
   /** Export modal — one entry point, asks which file format to write. */
   const [exportOpen, setExportOpen] = useState(false);
+
+  /** Mission overview: full launch-profile model, or the simple bar timeline. */
+  const [missionView, setMissionView] = useState<"model" | "timeline">(() => {
+    return localStorage.getItem("vx.missionView") === "timeline" ? "timeline" : "model";
+  });
+  function saveMissionView(v: "model" | "timeline") {
+    setMissionView(v);
+    localStorage.setItem("vx.missionView", v);
+  }
+
+  /** User's own docs/learning site — used for every widget's "Learn more" link.
+      Left blank by default; the owner pastes their teaching site in Settings. */
+  const [docsUrl, setDocsUrl] = useState<string>(() => localStorage.getItem("vx.docsUrl") ?? "");
+  function saveDocsUrl(u: string) {
+    setDocsUrl(u);
+    localStorage.setItem("vx.docsUrl", u);
+  }
+
+  /** Widget help modal — shows connection/troubleshooting/about for one widget. */
+  const [helpWidget, setHelpWidget] = useState<WidgetId | null>(null);
 
   /** Flight log */
   const [flightLogOpen, setFlightLogOpen] = useState(false);
@@ -2225,6 +2390,10 @@ ${trkpts}
         }
         .vx-modal.vx-settings { width: min(640px, 94vw); height: min(760px, 88vh); }
         .vx-modal.vx-export { width: min(560px, 94vw); height: auto; max-height: 86vh; }
+        .vx-modal.vx-help-modal {
+          display: flex; flex-direction: column; grid-template-columns: none;
+          width: min(600px, 94vw); height: auto; max-height: 86vh;
+        }
 
         .vx-settings-head {
           display: flex; align-items: center; justify-content: space-between;
@@ -2640,6 +2809,37 @@ ${trkpts}
         .vx-model-ev:hover { color: var(--vx-accent-bright); border-color: var(--vx-line-strong); }
         .vx-model-ev.reached { color: var(--vx-fg); border-color: var(--vx-go); }
         .vx-model-ev-t { font-family: var(--vx-font-mono); color: var(--vx-fg-faint); margin-left: 4px; }
+
+        /* ---- Mission Timeline: the simple bar variant ---- */
+        .vx-timeline {
+          position: relative;
+          margin-bottom: 12px;
+          padding: 26px 16px 24px;
+          border: 1px solid var(--vx-line);
+          border-radius: 4px;
+          background: rgba(20, 20, 23, 0.4);
+        }
+        .vx-timeline-rail { position: relative; height: 2px; background: var(--vx-line-strong); margin: 0 6px; }
+        .vx-timeline-fill { position: absolute; left: 0; top: 0; height: 100%; background: var(--vx-accent); }
+        .vx-timeline-now {
+          position: absolute; top: -5px; width: 2px; height: 12px;
+          background: var(--vx-go); box-shadow: 0 0 8px var(--vx-go-glow); transform: translateX(-1px);
+        }
+        .vx-tl-event {
+          position: absolute; transform: translateX(-50%);
+          display: flex; flex-direction: column; align-items: center;
+          cursor: pointer; background: none; border: none; padding: 0;
+        }
+        .vx-tl-tick { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--vx-bg0); background: var(--vx-accent-bright); }
+        .vx-tl-event.reached .vx-tl-tick { background: var(--vx-go); }
+        .vx-tl-lbl {
+          position: absolute; font-family: var(--vx-font-display); font-size: 9px;
+          letter-spacing: 0.1em; text-transform: uppercase; color: var(--vx-fg-dim); white-space: nowrap;
+        }
+        .vx-tl-event:hover .vx-tl-lbl { color: var(--vx-accent-bright); }
+        .vx-tl-lbl.above { bottom: 14px; }
+        .vx-tl-lbl.below { top: 14px; }
+        .vx-tl-time { font-family: var(--vx-font-mono); color: var(--vx-fg-faint); }
       `}</style>
 
       {/* ---------- Mission Control Header ---------- */}
@@ -2807,15 +3007,20 @@ ${trkpts}
         </div>
       )}
 
-      {/* Mission Model — live launch profile from the pad coordinates */}
-      <MissionModel
-        events={derivedEvents}
-        frames={display.frames}
-        latest={display.latest}
-        currentTms={display.t_ms}
-        phase={flightPhase}
-        onJump={jumpToEvent}
-      />
+      {/* Mission overview — live launch-profile model or the simple bar
+          timeline, selectable in Settings → Display */}
+      {missionView === "timeline" ? (
+        <MissionTimelineBar events={derivedEvents} currentTms={display.t_ms} onJump={jumpToEvent} />
+      ) : (
+        <MissionModel
+          events={derivedEvents}
+          frames={display.frames}
+          latest={display.latest}
+          currentTms={display.t_ms}
+          phase={flightPhase}
+          onJump={jumpToEvent}
+        />
+      )}
 
       {/* Alerts */}
       {alerts.length > 0 && (
@@ -3105,6 +3310,7 @@ ${trkpts}
                 onTogglePin={() => toggleWidgetPin(inst.key)}
                 onSendCommand={sendCommand}
                 onRemove={() => removeWidget(inst.key)}
+                onHelp={() => setHelpWidget(inst.widgetId)}
               />
             </div>
           ))}
@@ -3185,6 +3391,10 @@ ${trkpts}
           alarmMuted={alarmMuted}
           onToggleAlarmMute={toggleAlarmMute}
           alertRuleCount={alertRules.length}
+          missionView={missionView}
+          onMissionView={saveMissionView}
+          docsUrl={docsUrl}
+          onDocsUrl={saveDocsUrl}
           onOpenExport={() => setExportOpen(true)}
           onOpenVehicle={() => setVehicleOpen(true)}
           onOpenAlertRules={() => setAlertRulesOpen(true)}
@@ -3209,6 +3419,11 @@ ${trkpts}
             setExportOpen(false);
           }}
         />
+      )}
+
+      {/* Widget help — connection, troubleshooting, and the operator's docs link */}
+      {helpWidget && (
+        <WidgetHelpModal widgetId={helpWidget} docsUrl={docsUrl} onClose={() => setHelpWidget(null)} />
       )}
 
       {/* Vehicle Modal */}
@@ -3951,6 +4166,39 @@ function VehicleModal(props: { onClose: () => void }) {
     await refreshModels();
   }
 
+  // 2D side profile for the Mission Model — rendered from the sustainer CAD.
+  const [profileMsg, setProfileMsg] = useState("");
+  const [hasProfile, setHasProfile] = useState<boolean>(() => {
+    try { return !!localStorage.getItem("vx.vehicleSideImage"); } catch { return false; }
+  });
+
+  async function captureProfile() {
+    setProfileMsg("Rendering 2D profile…");
+    try {
+      const m = await getVehicleModel("sustainer");
+      if (!m) { setProfileMsg("Upload a CAD model first."); return; }
+      // Dynamic import keeps three.js out of the main bundle.
+      const { captureSideProfile, saveSideProfile } = await import("./widgets/captureSideProfile");
+      const { dataUrl, aspect } = await captureSideProfile(m, cfg.upAxis);
+      saveSideProfile(dataUrl, aspect);
+      notifyVehicleChanged();
+      setHasProfile(true);
+      setProfileMsg("Captured — the Mission Model now flies your rocket.");
+    } catch (e: any) {
+      setProfileMsg(e?.message ?? "capture failed");
+    }
+  }
+
+  function clearProfile() {
+    try {
+      localStorage.removeItem("vx.vehicleSideImage");
+      localStorage.removeItem("vx.vehicleSideImageAR");
+    } catch { /* ignore */ }
+    notifyVehicleChanged();
+    setHasProfile(false);
+    setProfileMsg("");
+  }
+
   const UP_AXES: UpAxis[] = ["y", "-y", "z", "-z", "x", "-x"];
 
   function ModelSlot({ role, name }: { role: StageRole; name: string | null }) {
@@ -4057,6 +4305,31 @@ function VehicleModal(props: { onClose: () => void }) {
         <ModelSlot role="sustainer" name={sustainerName} />
         {cfg.stages === 2 && <ModelSlot role="booster" name={boosterName} />}
 
+        {/* 2D side profile for the Mission Model */}
+        <div className="vx-card" style={{ marginTop: 10 }}>
+          <div className="vx-label" style={{ marginBottom: 8 }}>Mission Model profile</div>
+          <div style={{ fontSize: 12, color: "var(--vx-fg-dim)", lineHeight: 1.6, marginBottom: 10 }}>
+            Render a flat side view of your CAD to use as the vehicle in the Mission Model launch
+            profile. Capture it after uploading the airframe and getting the nose axis upright.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <button className="vx-btn vx-btn-primary" onClick={captureProfile} disabled={!sustainerName}>
+              {hasProfile ? "Re-capture 2D profile" : "Capture 2D profile"}
+            </button>
+            {hasProfile && <button className="vx-btn vx-btn-danger" onClick={clearProfile}>Remove profile</button>}
+            {hasProfile && (
+              <img
+                src={localStorage.getItem("vx.vehicleSideImage") ?? ""}
+                alt="Captured side profile"
+                style={{ height: 40, border: "1px solid var(--vx-line)", borderRadius: 3, background: "rgba(0,0,0,0.25)" }}
+              />
+            )}
+          </div>
+          {profileMsg && (
+            <div style={{ fontSize: 11, marginTop: 8, fontFamily: "var(--vx-font-mono)", color: "var(--vx-caution)" }}>{profileMsg}</div>
+          )}
+        </div>
+
         <div style={{ marginTop: 12, fontSize: 11, color: busy ? "var(--vx-caution)" : "var(--vx-fg-faint)", fontFamily: "var(--vx-font-mono)" }}>
           {busy || "Formats: .glb / .gltf (recommended), .stl, .obj · stored locally in your browser."}
         </div>
@@ -4090,6 +4363,10 @@ function SettingsModal(props: {
   alarmMuted: boolean;
   onToggleAlarmMute: () => void;
   alertRuleCount: number;
+  missionView: "model" | "timeline";
+  onMissionView: (v: "model" | "timeline") => void;
+  docsUrl: string;
+  onDocsUrl: (u: string) => void;
   onOpenExport: () => void;
   onOpenVehicle: () => void;
   onOpenAlertRules: () => void;
@@ -4219,6 +4496,27 @@ function SettingsModal(props: {
               </div>
 
               <div className="vx-card">
+                <div className="vx-card-title">Mission Overview</div>
+                <div className="vx-help">How the launch is shown above the dashboard.</div>
+                <div className="vx-seg" style={{ marginTop: 10, display: "inline-flex" }}>
+                  <button
+                    className={props.missionView === "model" ? "on" : ""}
+                    onClick={() => props.onMissionView("model")}
+                    title="Live launch-profile model with the vehicle flying its trajectory"
+                  >
+                    Model
+                  </button>
+                  <button
+                    className={props.missionView === "timeline" ? "on" : ""}
+                    onClick={() => props.onMissionView("timeline")}
+                    title="Simple bar timeline of flight events"
+                  >
+                    Timeline
+                  </button>
+                </div>
+              </div>
+
+              <div className="vx-card">
                 <div className="vx-card-title">Units</div>
                 <select className="vx-select" value={props.globalUnits} onChange={(e) => props.onUnits(e.target.value as UnitSystem)} style={{ width: "100%" }}>
                   <option value="metric">Metric (m, m/s, °C)</option>
@@ -4335,6 +4633,23 @@ function SettingsModal(props: {
 
           {tab === "tools" && (
             <>
+              <div className="vx-card">
+                <div className="vx-card-title">Learn &amp; docs link</div>
+                <div className="vx-help">
+                  Your own tutorials site. Every widget's help panel shows a “Learn more” button
+                  that opens this link — the place to teach people how TVC, canards, and the rest work.
+                  Leave blank to hide the button.
+                </div>
+                <input
+                  className="vx-input"
+                  style={{ marginTop: 10 }}
+                  type="url"
+                  placeholder="https://your-site.com/tutorials"
+                  value={props.docsUrl}
+                  onChange={(e) => props.onDocsUrl(e.target.value.trim())}
+                />
+              </div>
+
               <div className="vx-card">
                 <div className="vx-card-title">Radio</div>
                 <div className="vx-help">Configure a SiK / RFD900-family telemetry radio over the serial link.</div>
@@ -4460,6 +4775,75 @@ function ExportModal(props: {
     </div>
   );
 }
+
+/** ---------- WidgetHelpModal ----------
+ * Per-widget help: what it is, how to wire the hardware that feeds it,
+ * troubleshooting, the exact telemetry fields it reads, and a Learn-more link
+ * to the operator's own tutorials site (configured in Settings → Tools). */
+function WidgetHelpModal(props: { widgetId: WidgetId; docsUrl: string; onClose: () => void }) {
+  const def: any = WIDGETS.find((w: any) => w.id === props.widgetId);
+  const help = WIDGET_HELP[props.widgetId];
+  const learn = learnMoreUrl(props.docsUrl, props.widgetId);
+
+  return (
+    <div className="vx-modal-backdrop" onMouseDown={props.onClose}>
+      <div className="vx-modal vx-help-modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="vx-settings-head">
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 18 }}>{def?.name ?? props.widgetId}</div>
+            <div className="vx-help" style={{ marginTop: 2 }}>{def?.category} widget · how it works</div>
+          </div>
+          <button className="vx-xbtn" onClick={props.onClose}>×</button>
+        </div>
+
+        <div className="vx-settings-body">
+          {help ? (
+            <>
+              <div className="vx-card">
+                <div className="vx-card-title">What it is</div>
+                <div style={{ fontSize: 13, lineHeight: 1.65, color: "var(--vx-fg-dim)" }}>{help.about}</div>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Connect your hardware</div>
+                <div style={{ fontSize: 13, lineHeight: 1.65, color: "var(--vx-fg-dim)" }}>{help.connect}</div>
+                <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                  <span className="vx-help">Reads:</span>
+                  {help.fields.map((f) => (
+                    <code key={f} style={{ fontSize: 11 }}>{f}</code>
+                  ))}
+                </div>
+              </div>
+
+              <div className="vx-card">
+                <div className="vx-card-title">Troubleshooting</div>
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.7, color: "var(--vx-fg-dim)" }}>
+                  {help.troubleshoot.map((t, i) => <li key={i}>{t}</li>)}
+                </ul>
+              </div>
+            </>
+          ) : (
+            <div className="vx-card">
+              <div style={{ fontSize: 13, color: "var(--vx-fg-dim)" }}>{def?.hardwareHint ?? "No help available for this widget yet."}</div>
+            </div>
+          )}
+        </div>
+
+        <div className="vx-settings-foot" style={{ justifyContent: "space-between" }}>
+          {learn ? (
+            <button className="vx-btn vx-btn-primary" onClick={() => window.open(learn, "_blank", "noopener,noreferrer")}>
+              Learn more ↗
+            </button>
+          ) : (
+            <span className="vx-help">Tip: add your tutorials site in Settings → Tools to show a Learn-more link here.</span>
+          )}
+          <button className="vx-btn" onClick={props.onClose}>Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** ---------- ColorTile (better UX + reset) ---------- */
 function ColorTile(props: { label: string; value: string; onChange: (v: string) => void; onReset: () => void }) {
   const text = autoTextColor(props.value);
@@ -4799,6 +5183,7 @@ function WidgetFrame(props: {
   onTogglePin: () => void;
   onSendCommand: (cmd: string) => void;
   onRemove: () => void;
+  onHelp: () => void;
 }) {
   const def: any = WIDGETS.find((x: any) => x.id === props.widgetId);
 
@@ -4940,6 +5325,18 @@ function WidgetFrame(props: {
             >
               <input type="color" value={accent} onChange={(e) => props.onPatchSettings({ accent: e.target.value })} style={{ opacity: 0, width: "100%", height: "100%" }} />
             </label>
+
+            {/* Widget help — how to connect hardware, troubleshooting, and a
+                Learn-more link to the operator's own tutorials site */}
+            <button
+              className="vx-tbtn"
+              onClick={props.onHelp}
+              title="How this widget works, wiring & troubleshooting"
+              aria-label="Widget help"
+              style={{ fontWeight: 700, fontFamily: "var(--vx-font-display)" }}
+            >
+              i
+            </button>
 
             {/* Per-widget lock: freezes this widget's position/size so canvas
                 interaction (e.g. orbiting the 3D model) can't move it */}

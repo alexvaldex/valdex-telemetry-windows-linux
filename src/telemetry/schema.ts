@@ -121,6 +121,16 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
   const tvcEnRaw = pick(raw, ["tvc_enabled", "tvc_en", "gimbal_enabled"]);
   const tvc_enabled = tvcEnRaw === 0 || tvcEnRaw === 1 ? (tvcEnRaw as 0 | 1) : undefined;
 
+  // Canard fins — per-fin deflection + roll control
+  const canard_1_deg = num(pick(raw, ["canard_1_deg", "canard_1", "fin_1_deg", "fin1"]));
+  const canard_2_deg = num(pick(raw, ["canard_2_deg", "canard_2", "fin_2_deg", "fin2"]));
+  const canard_3_deg = num(pick(raw, ["canard_3_deg", "canard_3", "fin_3_deg", "fin3"]));
+  const canard_4_deg = num(pick(raw, ["canard_4_deg", "canard_4", "fin_4_deg", "fin4"]));
+  const canard_roll_cmd_deg = num(pick(raw, ["canard_roll_cmd_deg", "roll_cmd", "canard_roll_cmd"]));
+  const roll_rate_dps = num(pick(raw, ["roll_rate_dps", "roll_rate", "rollrate"]));
+  const canEnRaw = pick(raw, ["canard_enabled", "canard_en", "fins_enabled"]);
+  const canard_enabled = canEnRaw === 0 || canEnRaw === 1 ? (canEnRaw as 0 | 1) : undefined;
+
   // Events / continuity
   const event = typeof raw.event === "string" ? raw.event : (typeof raw.ev === "string" ? raw.ev : undefined);
   const pyro_main_cont = raw.pyro_main_cont === 0 || raw.pyro_main_cont === 1 ? raw.pyro_main_cont : undefined;
@@ -149,6 +159,13 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
     tvc_pitch_fb_deg,
     tvc_yaw_fb_deg,
     tvc_enabled,
+    canard_1_deg,
+    canard_2_deg,
+    canard_3_deg,
+    canard_4_deg,
+    canard_roll_cmd_deg,
+    roll_rate_dps,
+    canard_enabled,
     temp_c,
     pressure_pa,
     humidity_pct,
