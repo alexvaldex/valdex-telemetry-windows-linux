@@ -64,6 +64,13 @@ optional `canard_enabled`). The **Canard Fins** widget shows the fins working
 from a nose-on view and flags when roll authority is lost. Aliases: `fin1`..
 `fin4`, `roll_rate`.
 
+**Air brakes** (optional): send `airbrake_pct` (0–100 deployment), optionally
+`airbrake_fb_pct` (actuator feedback), and `airbrake_target_apogee_m` /
+`airbrake_pred_apogee_m` for the apogee tracker. The **Air Brakes** widget shows
+deployment and whether the predicted apogee is converging on the target — the
+core loop for altitude-targeting competitions. Aliases: `speedbrake_pct`,
+`target_apogee_m`, `pred_apogee_m` (`*_ft` variants convert).
+
 Every widget has an **info (i) button** with wiring and troubleshooting help,
 and a Learn-more link you point at your own tutorials site (Settings → Tools).
 

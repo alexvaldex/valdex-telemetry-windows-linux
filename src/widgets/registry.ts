@@ -15,7 +15,8 @@ export type WidgetId =
   | "tilt.spin"
   | "link.quality"
   | "tvc.panel"
-  | "canard.panel";
+  | "canard.panel"
+  | "airbrake.panel";
 
 export type WidgetCategory = "Core" | "Navigation" | "IMU" | "Attitude" | "Viz" | "Flight" | "Safety" | "Sensors" | "Link" | "Control";
 
@@ -205,6 +206,17 @@ export const WIDGETS: WidgetDef[] = [
     category: "Control",
     requires: ["canard_1_deg"],
     hardwareHint: "Forward steering fins on servos. Send canard_1_deg..canard_4_deg (per-fin deflection) and roll_rate_dps for the roll rate being damped.",
+    defaultSize: { w: 6, h: 8 },
+    defaultView: "card",
+    views: ["card"],
+    defaultTheme: { accent: "#d8dbe0" },
+  },
+  {
+    id: "airbrake.panel",
+    name: "Air Brakes",
+    category: "Control",
+    requires: ["airbrake_pct"],
+    hardwareHint: "Deployable drag surfaces for apogee targeting. Send airbrake_pct (0–100); add airbrake_target_apogee_m / airbrake_pred_apogee_m for the apogee tracker.",
     defaultSize: { w: 6, h: 8 },
     defaultView: "card",
     views: ["card"],

@@ -131,6 +131,18 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
   const canEnRaw = pick(raw, ["canard_enabled", "canard_en", "fins_enabled"]);
   const canard_enabled = canEnRaw === 0 || canEnRaw === 1 ? (canEnRaw as 0 | 1) : undefined;
 
+  // Air brakes — deployment % + apogee targeting
+  const airbrake_pct = num(pick(raw, ["airbrake_pct", "airbrake", "brake_pct", "speedbrake_pct", "airbrakes"]));
+  const airbrake_fb_pct = num(pick(raw, ["airbrake_fb_pct", "airbrake_fb", "brake_fb_pct"]));
+  const airbrake_target_apogee_m =
+    num(pick(raw, ["airbrake_target_apogee_m", "target_apogee_m", "target_apogee"])) ??
+    (num(pick(raw, ["target_apogee_ft"])) !== undefined ? num(pick(raw, ["target_apogee_ft"]))! * 0.3048 : undefined);
+  const airbrake_pred_apogee_m =
+    num(pick(raw, ["airbrake_pred_apogee_m", "pred_apogee_m", "predicted_apogee_m"])) ??
+    (num(pick(raw, ["pred_apogee_ft"])) !== undefined ? num(pick(raw, ["pred_apogee_ft"]))! * 0.3048 : undefined);
+  const abEnRaw = pick(raw, ["airbrake_enabled", "airbrake_en", "brakes_enabled"]);
+  const airbrake_enabled = abEnRaw === 0 || abEnRaw === 1 ? (abEnRaw as 0 | 1) : undefined;
+
   // Events / continuity
   const event = typeof raw.event === "string" ? raw.event : (typeof raw.ev === "string" ? raw.ev : undefined);
   const pyro_main_cont = raw.pyro_main_cont === 0 || raw.pyro_main_cont === 1 ? raw.pyro_main_cont : undefined;
@@ -166,6 +178,11 @@ export function normalizeTelemetryFrame(raw: AnyObj, fallbackTms?: number): Tele
     canard_roll_cmd_deg,
     roll_rate_dps,
     canard_enabled,
+    airbrake_pct,
+    airbrake_fb_pct,
+    airbrake_target_apogee_m,
+    airbrake_pred_apogee_m,
+    airbrake_enabled,
     temp_c,
     pressure_pa,
     humidity_pct,

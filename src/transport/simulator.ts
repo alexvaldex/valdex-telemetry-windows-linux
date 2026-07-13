@@ -75,6 +75,8 @@ export class SimulatorConnection implements Connection {
   private tvcPitchFb = 0; // TVC servo feedback (lags the command)
   private tvcYawFb = 0;
   private rollRateDps = 0; // roll rate the canards are damping
+  private airbrakeTarget = 0; // latched target apogee (m AGL)
+  private airbrakeFb = 0; // air-brake actuator feedback (lags command)
 
   // Per-stream packet sequence counters (~1.5% simulated drop rate).
   private seqSust = 0;
@@ -124,6 +126,8 @@ export class SimulatorConnection implements Connection {
     this.tvcPitchFb = 0;
     this.tvcYawFb = 0;
     this.rollRateDps = 0;
+    this.airbrakeTarget = 0;
+    this.airbrakeFb = 0;
     this.booster = null;
     this.seqSust = 0;
     this.seqBstr = 0;
@@ -369,6 +373,26 @@ export class SimulatorConnection implements Connection {
       this.rollRateDps = spinRateDps; // uncontrolled: just the body spin rate
     }
 
+    /* --- Air brakes ----------------------------------------------------
+       Target apogee is latched at burnout as 88% of the ballistic prediction
+       (v²/2g). During coast the brakes deploy proportionally to the predicted
+       overshoot, then stow at apogee. Feedback lags the command. */
+    if (this.phase === "boost") {
+      const predBallistic = Math.max(0, alt) + (vel * vel) / (2 * G);
+      this.airbrakeTarget = 0.88 * predBallistic;
+    }
+    const airbrakeArmed = this.phase === "coast" && this.airbrakeTarget > 0;
+    let abCmd = 0;
+    let abPred = this.airbrakeTarget;
+    if (airbrakeArmed) {
+      abPred = Math.max(0, alt) + (vel > 0 ? (vel * vel) / (2 * G) : 0);
+      const overshoot = abPred - this.airbrakeTarget;
+      // ~15% overshoot maps to full deployment.
+      abCmd = Math.max(0, Math.min(100, (overshoot / (0.15 * this.airbrakeTarget || 1)) * 100));
+    }
+    const abLag = 1 - Math.exp(-dtSec / 0.25);
+    this.airbrakeFb += (abCmd - this.airbrakeFb) * abLag;
+
     this.seqSust += Math.random() < 0.015 ? 2 : 1; // occasional dropped packet
     const frame: Record<string, unknown> = {
       v: 1,
@@ -411,6 +435,11 @@ export class SimulatorConnection implements Connection {
       canard_3_deg: Math.round(finDefl * 100) / 100,
       canard_4_deg: Math.round(-finDefl * 100) / 100,
       roll_rate_dps: Math.round(this.rollRateDps * 10) / 10,
+      airbrake_enabled: airbrakeArmed ? 1 : 0,
+      airbrake_pct: Math.round(abCmd * 10) / 10,
+      airbrake_fb_pct: Math.round(this.airbrakeFb * 10) / 10,
+      airbrake_target_apogee_m: this.airbrakeTarget > 0 ? Math.round(this.airbrakeTarget) : undefined,
+      airbrake_pred_apogee_m: this.airbrakeTarget > 0 ? Math.round(abPred) : undefined,
       pyro_drogue_cont: this.drogueCont,
       pyro_main_cont: this.mainCont,
     };

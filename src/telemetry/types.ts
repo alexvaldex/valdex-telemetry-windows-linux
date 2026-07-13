@@ -59,6 +59,15 @@ export type TelemetryFrameV1 = {
   roll_rate_dps?: number;       // measured roll rate the canards are damping
   canard_enabled?: 0 | 1;
 
+  // Air brakes (Tier 3) — deployable drag surfaces for apogee targeting.
+  // Deployment is 0–100 % (fully stowed → fully open). The controller nulls
+  // the gap between the predicted apogee and the target apogee.
+  airbrake_pct?: number;              // commanded deployment 0–100
+  airbrake_fb_pct?: number;           // actual/feedback deployment 0–100
+  airbrake_target_apogee_m?: number;  // target apogee AGL
+  airbrake_pred_apogee_m?: number;    // live predicted apogee AGL
+  airbrake_enabled?: 0 | 1;
+
   // Events / pyro / states (Tier 3)
   event?: string;
   pyro_main_cont?: 0 | 1;

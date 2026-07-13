@@ -137,6 +137,7 @@ import { RangeMapWidget } from "./rangeMap";
 import { PyroPanelWidget } from "./pyroPanel";
 import { TvcPanelWidget } from "./tvcPanel";
 import { CanardPanelWidget } from "./canardPanel";
+import { AirbrakePanelWidget } from "./airbrakePanel";
 import { tiltDegFromQuat } from "../telemetry/attitude";
 
 
@@ -916,6 +917,10 @@ export function renderWidget(args: {
 
   if (widgetId === "canard.panel") {
     return <CanardPanelWidget frames={frames} latest={latest} />;
+  }
+
+  if (widgetId === "airbrake.panel") {
+    return <AirbrakePanelWidget frames={frames} latest={latest} unitSystem={unitSystem} />;
   }
 
   if (widgetId === "pyro.panel") {

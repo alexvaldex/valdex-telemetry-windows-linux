@@ -28,6 +28,7 @@ export const RULE_FIELDS = [
   "temp_c", "pressure_pa", "humidity_pct",
   "tvc_pitch_deg", "tvc_yaw_deg", "tvc_pitch_fb_deg", "tvc_yaw_fb_deg",
   "canard_1_deg", "canard_2_deg", "canard_3_deg", "canard_4_deg", "roll_rate_dps",
+  "airbrake_pct", "airbrake_fb_pct", "airbrake_pred_apogee_m",
 ] as const;
 
 const KEY = "vx.alertRules";

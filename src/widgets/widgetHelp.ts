@@ -203,6 +203,20 @@ export const WIDGET_HELP: Record<WidgetId, WidgetHelp> = {
     ],
     learnSlug: "canards",
   },
+  "airbrake.panel": {
+    about:
+      "Air brakes — deployable drag surfaces (petals or flaps) that pop out during coast to bleed off energy and hit an exact target apogee. Essential for altitude-targeting competitions, where getting closest to a set altitude wins. This panel shows how far the brakes are open and whether the predicted apogee is converging on the target.",
+    fields: ["airbrake_pct", "airbrake_fb_pct", "airbrake_target_apogee_m", "airbrake_pred_apogee_m", "airbrake_enabled"],
+    connect:
+      "Your air-brake controller sends the commanded deployment as airbrake_pct (0–100). Add airbrake_fb_pct if the actuator reports its real position, and airbrake_target_apogee_m + airbrake_pred_apogee_m (meters AGL) to drive the apogee tracker. airbrake_enabled (0/1) marks when it's armed. Aliases: speedbrake_pct, target_apogee_m, pred_apogee_m; *_ft variants convert.",
+    troubleshoot: [
+      "Blank: send at least airbrake_pct.",
+      "Brakes pegged at 100% and apogee still over target: you can't shed enough energy — deploy earlier, or the drag area is too small for this motor.",
+      "Predicted apogee jumps around: your onboard apogee estimate is noisy — filter velocity before predicting (a Kalman/altitude+accel fusion helps).",
+      "Brakes deploy on the pad or descent: gate deployment to the coast phase only in firmware.",
+    ],
+    learnSlug: "airbrakes",
+  },
 };
 
 /** Build the Learn-more URL for a widget from the user's configured docs base. */
