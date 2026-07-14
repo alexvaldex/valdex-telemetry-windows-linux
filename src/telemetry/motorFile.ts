@@ -87,6 +87,79 @@ function estimatePropMass(curve: Array<[number, number]>): number {
   return Math.max(0.02, impulse / 2000); // ~2000 Ns/kg for composite APCP
 }
 
+/* ---------------- thrustcurve.org search ---------------- */
+
+export type MotorSearchResult = {
+  motorId: string;
+  name: string;
+  impulseNs: number;
+  avgThrustN: number;
+  burnS: number;
+  propKg: number;
+  diameterMm?: number;
+  impulseClass?: string;
+};
+
+const TC_API = "https://www.thrustcurve.org/api/v1";
+
+/** Search thrustcurve.org by (common) designation, e.g. "J350". Network + the
+    site's CORS support required; throws a friendly error when offline. */
+export async function searchThrustcurve(query: string): Promise<MotorSearchResult[]> {
+  let res: Response;
+  try {
+    res = await fetch(`${TC_API}/search.json`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commonName: query.trim(), maxResults: 20 }),
+    });
+  } catch {
+    throw new Error("Couldn't reach thrustcurve.org — check your connection, or import a .eng file instead.");
+  }
+  if (!res.ok) throw new Error(`thrustcurve.org search failed (${res.status})`);
+  const json = await res.json();
+  const results = Array.isArray(json?.results) ? json.results : [];
+  return results
+    .filter((r: any) => r?.motorId)
+    .map((r: any) => ({
+      motorId: String(r.motorId),
+      name: `${r.manufacturerAbbrev ?? r.manufacturer ?? ""} ${r.commonName ?? r.designation ?? ""}`.trim(),
+      impulseNs: Math.round(Number(r.totImpulseNs) || 0),
+      avgThrustN: Math.round(Number(r.avgThrustN) || 0),
+      burnS: Number(r.burnTimeS) || 0,
+      propKg: (Number(r.propWeightG) || 0) / 1000,
+      diameterMm: Number(r.diameter) || undefined,
+      impulseClass: r.impulseClass,
+    }));
+}
+
+/** Download the real thrust-curve samples for a motorId and build a MotorSpec. */
+export async function downloadThrustcurve(result: MotorSearchResult): Promise<MotorSpec> {
+  let res: Response;
+  try {
+    res = await fetch(`${TC_API}/download.json`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ motorIds: [result.motorId], data: "samples" }),
+    });
+  } catch {
+    throw new Error("Couldn't download the thrust curve from thrustcurve.org.");
+  }
+  if (!res.ok) throw new Error(`thrustcurve.org download failed (${res.status})`);
+  const json = await res.json();
+  const first = (Array.isArray(json?.results) ? json.results : []).find((r: any) => r?.samples?.length);
+  if (!first) throw new Error("No thrust-curve data available for that motor.");
+
+  const curve: Array<[number, number]> = first.samples
+    .map((s: any) => (Array.isArray(s) ? [Number(s[0]), Number(s[1])] : [Number(s.time), Number(s.thrust)]))
+    .filter((p: number[]) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  if (curve.length < 2) throw new Error("Downloaded curve had no usable data points.");
+  if (curve[0][0] > 0) curve.unshift([0, 0]);
+
+  const propKg = result.propKg > 0 ? result.propKg : estimatePropMass(curve);
+  const m = motorFromCurve(result.name, "", propKg, curve);
+  return { ...m, name: result.name }; // keep the clean thrustcurve name
+}
+
 /* ---------------- User motor store ---------------- */
 
 const KEY = "vx.userMotors";

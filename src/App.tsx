@@ -60,7 +60,7 @@ import {
   type SimProfile,
   type MotorSpec,
 } from "./telemetry/flightSim";
-import { parseEng, parseRse, parseOrk, getUserMotors, addUserMotors } from "./telemetry/motorFile";
+import { parseEng, parseRse, parseOrk, getUserMotors, addUserMotors, searchThrustcurve, downloadThrustcurve, type MotorSearchResult } from "./telemetry/motorFile";
 import { computeFlightSummary } from "./widgets/flightSummary";
 
 /** ---------- Types ---------- */
@@ -3936,6 +3936,40 @@ function SimSetupModal(props: { onClose: () => void }) {
     }
   }
 
+  // thrustcurve.org motor search.
+  const [tcQuery, setTcQuery] = useState("");
+  const [tcResults, setTcResults] = useState<MotorSearchResult[] | null>(null);
+  const [tcBusy, setTcBusy] = useState(false);
+  async function runTcSearch() {
+    if (!tcQuery.trim()) return;
+    setTcBusy(true); setImportMsg("");
+    try {
+      const results = await searchThrustcurve(tcQuery);
+      setTcResults(results);
+      if (!results.length) setImportMsg("No motors found — try a common name like “J350”.");
+    } catch (e: any) {
+      setImportMsg(e?.message ?? "search failed");
+      setTcResults(null);
+    } finally {
+      setTcBusy(false);
+    }
+  }
+  async function pickTcResult(r: MotorSearchResult) {
+    setTcBusy(true); setImportMsg(`Downloading ${r.name} thrust curve…`);
+    try {
+      const motor = await downloadThrustcurve(r);
+      setUserMotors(addUserMotors([motor]));
+      update({ motor: { ...motor } });
+      setTcResults(null);
+      setTcQuery("");
+      setImportMsg(`Loaded ${motor.name} — real thrust curve from thrustcurve.org`);
+    } catch (e: any) {
+      setImportMsg(e?.message ?? "download failed");
+    } finally {
+      setTcBusy(false);
+    }
+  }
+
   function update(patch: Partial<SimProfile>) {
     setProf((prev) => {
       const next: SimProfile = {
@@ -4041,6 +4075,37 @@ function SimSetupModal(props: { onClose: () => void }) {
               </select>
               {prof.motor.curve && prof.motor.curve.length > 1 && (
                 <ThrustCurveSpark curve={prof.motor.curve} />
+              )}
+
+              {/* thrustcurve.org search */}
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  className="vx-input"
+                  style={{ flex: 1, fontSize: 12 }}
+                  placeholder="Search thrustcurve.org — e.g. J350"
+                  value={tcQuery}
+                  onChange={(e) => setTcQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") runTcSearch(); }}
+                />
+                <button className="vx-btn" onClick={runTcSearch} disabled={tcBusy || !tcQuery.trim()}>
+                  {tcBusy ? "…" : "Search"}
+                </button>
+              </div>
+              {tcResults && tcResults.length > 0 && (
+                <div style={{ display: "grid", gap: 4, maxHeight: 160, overflow: "auto" }}>
+                  {tcResults.map((r) => (
+                    <button
+                      key={r.motorId}
+                      className="vx-btn"
+                      style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, textAlign: "left" }}
+                      onClick={() => pickTcResult(r)}
+                      title="Download this motor's real thrust curve"
+                    >
+                      <span>{r.name}</span>
+                      <span style={{ color: "var(--vx-fg-faint)", fontFamily: "var(--vx-font-mono)" }}>{r.impulseNs} Ns</span>
+                    </button>
+                  ))}
+                </div>
               )}
               {importMsg && (
                 <div style={{ fontSize: 11, color: "var(--vx-caution)", fontFamily: "var(--vx-font-mono)" }}>{importMsg}</div>
