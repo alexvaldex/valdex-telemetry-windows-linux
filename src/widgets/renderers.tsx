@@ -139,6 +139,7 @@ import { TvcPanelWidget } from "./tvcPanel";
 import { CanardPanelWidget } from "./canardPanel";
 import { AirbrakePanelWidget } from "./airbrakePanel";
 import { tiltDegFromQuat } from "../telemetry/attitude";
+import { fuseAltVel } from "../telemetry/fusion";
 
 
 
@@ -708,7 +709,15 @@ export function renderWidget(args: {
   }
 
   if (widgetId === "velocity.card") {
-    const vel = latest?.vel_mps;
+    // Prefer the transmitted velocity; if the flight computer doesn't send one,
+    // fall back to the baro+accel fusion estimate so the widget still works.
+    let vel = latest?.vel_mps;
+    let velFused = false;
+    if (typeof vel !== "number" && frames.length > 4) {
+      const { velF } = fuseAltVel(frames.slice(-400));
+      const vf = velF[velF.length - 1];
+      if (Number.isFinite(vf)) { vel = vf; velFused = true; }
+    }
     const v = typeof vel === "number" ? (unitSystem === "imperial" ? mpsToFps(vel) : vel) : undefined;
     const u = unitSystem === "imperial" ? "ft/s" : "m/s";
 
@@ -735,19 +744,20 @@ export function renderWidget(args: {
     const tempC = typeof latest?.temp_c === "number" ? latest.temp_c : 15;
     const mach = typeof vel === "number" ? Math.abs(vel) / Math.sqrt(1.4 * 287.05 * (tempC + 273.15)) : undefined;
     const dirText = typeof vel === "number" ? (ascending ? "▲ ASCENDING" : "▼ DESCENDING") : "+ up / − down";
+    const fusedTag = velFused ? <span style={{ color: "var(--vx-fg-faint)" }}> · fused</span> : null;
     return (
       <BigReadout
         value={fmt(v, 1)}
         unit={u}
         accent={typeof vel === "number" ? (ascending ? "var(--vx-fg)" : "var(--vx-caution)") : undefined}
-        stats={seriesStats(frames, "vel_mps", (mps) => (unitSystem === "imperial" ? mpsToFps(mps) : mps))}
+        stats={velFused ? null : seriesStats(frames, "vel_mps", (mps) => (unitSystem === "imperial" ? mpsToFps(mps) : mps))}
         sub={
           mach !== undefined && mach >= 0.3 ? (
             <span>
-              {dirText} · <b style={{ color: mach >= 1 ? "var(--vx-caution)" : "var(--vx-accent-bright)", fontFamily: "var(--vx-font-mono)" }}>MACH {mach.toFixed(2)}</b>
+              {dirText} · <b style={{ color: mach >= 1 ? "var(--vx-caution)" : "var(--vx-accent-bright)", fontFamily: "var(--vx-font-mono)" }}>MACH {mach.toFixed(2)}</b>{fusedTag}
             </span>
           ) : (
-            dirText
+            <span>{dirText}{fusedTag}</span>
           )
         }
       />

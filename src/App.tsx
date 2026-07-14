@@ -2013,6 +2013,33 @@ ${trkpts}
     }
   }, [telemetry.latest, alertRules, playback.mode, connStatus]);
 
+  /** Baro-vs-GPS altitude cross-check — a large sustained disagreement between
+      the two independent altitude sources is a classic sensor-fault signal. */
+  const padGpsAltRef = useRef<number | null>(null);
+  const baroGpsRunRef = useRef(0);
+  useEffect(() => {
+    if (playback.mode === "playback" || connStatus !== "connected") {
+      clearAlert("baro-gps-div");
+      padGpsAltRef.current = null;
+      baroGpsRunRef.current = 0;
+      return;
+    }
+    const f = telemetry.latest;
+    const gAlt = f?.gps_alt_m, bAlt = f?.alt_m;
+    if (typeof gAlt !== "number" || typeof bAlt !== "number") return;
+    // Latch ground MSL from GPS while still on the pad (baro AGL near zero).
+    if (padGpsAltRef.current === null && bAlt < 20) padGpsAltRef.current = gAlt;
+    if (padGpsAltRef.current === null) return;
+    const div = Math.abs(gAlt - (padGpsAltRef.current + bAlt));
+    if (div > 150) baroGpsRunRef.current++;
+    else baroGpsRunRef.current = 0;
+    if (baroGpsRunRef.current >= 5) {
+      pushAlert({ id: "baro-gps-div", level: "warn", title: "Baro / GPS altitude disagree", detail: `${div.toFixed(0)} m apart — possible sensor fault` });
+    } else if (baroGpsRunRef.current === 0) {
+      clearAlert("baro-gps-div");
+    }
+  }, [telemetry.latest, playback.mode, connStatus]);
+
   const modeChip = playback.mode === "playback" ? `PLAYBACK${playback.filename ? `: ${playback.filename}` : ""}` : "LIVE";
 
   // Hard disable layout mutation in flight mode OR playback.
