@@ -16,7 +16,53 @@ export type MotorSpec = {
   avgThrustN: number;  // average thrust
   burnS: number;       // burn time
   propKg: number;      // propellant mass
+  /** Optional real thrust curve as [time_s, thrust_N] points (from a .eng/.rse
+      file). When present the sim integrates it instead of the boxcar average —
+      giving a correct thrust spike, max-Q, and burnout velocity. */
+  curve?: Array<[number, number]>;
 };
+
+/** Instantaneous thrust (N) at burn time t (seconds). Uses the real curve with
+    linear interpolation when available, otherwise the boxcar average. */
+export function thrustAtTime(m: MotorSpec, t: number): number {
+  const c = m.curve;
+  if (!c || c.length < 2) return t <= m.burnS ? m.avgThrustN : 0;
+  if (t <= c[0][0]) return t < 0 ? 0 : c[0][1];
+  const last = c[c.length - 1];
+  if (t >= last[0]) return 0;
+  for (let i = 1; i < c.length; i++) {
+    if (t <= c[i][0]) {
+      const [t0, f0] = c[i - 1];
+      const [t1, f1] = c[i];
+      const u = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
+      return f0 + (f1 - f0) * u;
+    }
+  }
+  return 0;
+}
+
+/** Fraction of total impulse delivered by burn time t (0..1) — drives mass
+    depletion so the rocket lightens as the grain actually burns. */
+export function impulseFractionAt(m: MotorSpec, t: number): number {
+  const c = m.curve;
+  if (!c || c.length < 2) return Math.max(0, Math.min(1, t / m.burnS));
+  let acc = 0, total = 0;
+  for (let i = 1; i < c.length; i++) {
+    const [t0, f0] = c[i - 1];
+    const [t1, f1] = c[i];
+    const seg = ((f0 + f1) / 2) * (t1 - t0);
+    total += seg;
+    if (t >= t1) acc += seg;
+    else if (t > t0) acc += ((f0 + thrustAtTime(m, t)) / 2) * (t - t0);
+  }
+  return total > 0 ? Math.max(0, Math.min(1, acc / total)) : Math.max(0, Math.min(1, t / m.burnS));
+}
+
+/** Effective burn duration — the curve's end time when present. */
+export function motorBurnTime(m: MotorSpec): number {
+  const c = m.curve;
+  return c && c.length ? c[c.length - 1][0] : m.burnS;
+}
 
 /** Approximate specs for common certified motors — good enough for planning;
     enter exact numbers via Custom for competition work. */
@@ -169,9 +215,10 @@ export function stepFlight(s: FlightState, p: SimProfile, dt: number): FlightSta
   }
 
   if (s.phase === "boost") {
-    const burning = s.t <= p.motor.burnS;
-    const thrust = burning ? p.motor.avgThrustN : 0;
-    s.massKg = p.rocket.dryKg + p.motor.propKg * Math.max(0, 1 - s.t / p.motor.burnS);
+    const burnT = motorBurnTime(p.motor);
+    const burning = s.t <= burnT;
+    const thrust = thrustAtTime(p.motor, s.t);
+    s.massKg = p.rocket.dryKg + p.motor.propKg * (1 - impulseFractionAt(p.motor, s.t));
     const drag = dragN(s.vel, s.altAgl, p) * Math.sign(s.vel);
     const a = (thrust - drag) / s.massKg - G0;
     s.vel += a * dt;

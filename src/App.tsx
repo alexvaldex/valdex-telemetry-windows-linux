@@ -59,6 +59,7 @@ import {
   type SimProfile,
   type MotorSpec,
 } from "./telemetry/flightSim";
+import { parseEng, parseRse, parseOrk, getUserMotors, addUserMotors } from "./telemetry/motorFile";
 import { computeFlightSummary } from "./widgets/flightSummary";
 
 /** ---------- Types ---------- */
@@ -3765,6 +3766,28 @@ function ContextMenu(props: {
   );
 }
 
+/** Tiny inline thrust-curve preview for an imported motor. */
+function ThrustCurveSpark(props: { curve: Array<[number, number]> }) {
+  const c = props.curve;
+  const tMax = c[c.length - 1][0] || 1;
+  const fMax = Math.max(...c.map((p) => p[1])) || 1;
+  const W = 240, H = 46, pad = 3;
+  const x = (t: number) => pad + (t / tMax) * (W - 2 * pad);
+  const y = (f: number) => H - pad - (f / fMax) * (H - 2 * pad);
+  const d = c.map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(1)} ${y(p[1]).toFixed(1)}`).join(" ");
+  return (
+    <div title={`Peak ${Math.round(fMax)} N over ${tMax.toFixed(2)} s`} style={{ border: "1px solid var(--vx-line)", borderRadius: 3, background: "rgba(0,0,0,0.2)", padding: 4 }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 46, display: "block" }} role="img" aria-label="Thrust curve">
+        <path d={`${d} L${x(tMax).toFixed(1)} ${H - pad} L${x(0)} ${H - pad} Z`} fill="var(--vx-accent-glow)" stroke="none" />
+        <path d={d} fill="none" stroke="var(--vx-accent-bright)" strokeWidth="1.2" />
+      </svg>
+      <div style={{ fontSize: 10, color: "var(--vx-fg-faint)", fontFamily: "var(--vx-font-mono)", textAlign: "center" }}>
+        peak {Math.round(fMax)} N · {tMax.toFixed(2)} s
+      </div>
+    </div>
+  );
+}
+
 /** ---------- SimSetupModal — flight simulation configuration ---------- */
 function SimNum(props: { label: string; value: number; onChange: (v: number) => void; step?: number; unit?: string; hint?: string }) {
   return (
@@ -3783,7 +3806,39 @@ function SimNum(props: { label: string; value: number; onChange: (v: number) => 
 
 function SimSetupModal(props: { onClose: () => void }) {
   const [prof, setProf] = useState<SimProfile>(() => loadSimProfile());
-  const isCustomMotor = !MOTORS.some((m) => m.name === prof.motor.name);
+  const [userMotors, setUserMotors] = useState<MotorSpec[]>(() => getUserMotors());
+  const [importMsg, setImportMsg] = useState<string>("");
+  const allMotors = useMemo(() => [...userMotors, ...MOTORS], [userMotors]);
+  const isCustomMotor = !allMotors.some((m) => m.name === prof.motor.name);
+
+  async function importMotorFile(file: File) {
+    setImportMsg(`Reading ${file.name}…`);
+    try {
+      const text = await file.text();
+      const motors = /\.rse$/i.test(file.name) ? parseRse(text) : [parseEng(text)];
+      const merged = addUserMotors(motors);
+      setUserMotors(merged);
+      update({ motor: { ...motors[0] } }); // select the first imported motor
+      setImportMsg(`Imported ${motors.length} motor${motors.length === 1 ? "" : "s"} · real thrust curve loaded`);
+    } catch (e: any) {
+      setImportMsg(e?.message ?? "import failed");
+    }
+  }
+
+  async function importOrkFile(file: File) {
+    setImportMsg(`Reading ${file.name}…`);
+    try {
+      const buf = await file.arrayBuffer();
+      const r = await parseOrk(buf);
+      update({
+        name: r.name ?? prof.name,
+        rocket: { ...prof.rocket, ...(r.diameterMm ? { diameterMm: r.diameterMm } : {}), ...(r.dryKg ? { dryKg: r.dryKg } : {}) },
+      });
+      setImportMsg(r.note + (r.motorDesignation ? ` Motor in design: ${r.motorDesignation} — import its .eng for the real curve.` : ""));
+    } catch (e: any) {
+      setImportMsg(e?.message ?? "import failed");
+    }
+  }
 
   function update(patch: Partial<SimProfile>) {
     setProf((prev) => {
@@ -3831,7 +3886,14 @@ function SimSetupModal(props: { onClose: () => void }) {
           {/* Left column: vehicle + recovery */}
           <div style={{ display: "grid", gap: 10, alignContent: "start" }}>
             <div className="vx-card" style={{ display: "grid", gap: 10 }}>
-              <div className="vx-label">Rocket</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div className="vx-label">Rocket</div>
+                <label className="vx-btn" style={{ padding: "4px 10px", fontSize: 11 }} title="Import geometry from an OpenRocket .ork design (diameter, mass override, motor)">
+                  Import .ork
+                  <input type="file" accept=".ork" style={{ display: "none" }}
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) importOrkFile(f); e.currentTarget.value = ""; }} />
+                </label>
+              </div>
               <input className="vx-input" value={prof.name} onChange={(e) => update({ name: e.target.value })} placeholder="Vehicle name" />
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
                 <SimNum label="Dry mass" unit="kg" step={0.1} value={prof.rocket.dryKg} onChange={(v) => update({ rocket: { ...prof.rocket, dryKg: v } })} hint="Mass without propellant" />
@@ -3845,24 +3907,48 @@ function SimSetupModal(props: { onClose: () => void }) {
             </div>
 
             <div className="vx-card" style={{ display: "grid", gap: 10 }}>
-              <div className="vx-label">Motor</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div className="vx-label">Motor</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <label className="vx-btn" style={{ padding: "4px 10px", fontSize: 11 }} title="Import a RASP .eng or RockSim .rse thrust curve (from thrustcurve.org)">
+                    Import .eng/.rse
+                    <input type="file" accept=".eng,.rse" style={{ display: "none" }}
+                      onChange={(e) => { const f = e.target.files?.[0]; if (f) importMotorFile(f); e.currentTarget.value = ""; }} />
+                  </label>
+                </div>
+              </div>
               <select
                 className="vx-select"
                 value={isCustomMotor ? "__custom" : prof.motor.name}
                 onChange={(e) => {
                   const v = e.target.value;
-                  if (v === "__custom") update({ motor: { ...prof.motor, name: "Custom" } });
+                  if (v === "__custom") update({ motor: { ...prof.motor, name: "Custom", curve: undefined } });
                   else {
-                    const m = MOTORS.find((x) => x.name === v)!;
+                    const m = allMotors.find((x) => x.name === v)!;
                     update({ motor: { ...m } });
                   }
                 }}
               >
-                {MOTORS.map((m) => (
-                  <option key={m.name} value={m.name}>{m.name} — {m.impulseNs} Ns</option>
-                ))}
+                {userMotors.length > 0 && (
+                  <optgroup label="Imported (real thrust curve)">
+                    {userMotors.map((m) => (
+                      <option key={m.name} value={m.name}>{m.name} — {m.impulseNs} Ns ✓</option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="Built-in (approx)">
+                  {MOTORS.map((m) => (
+                    <option key={m.name} value={m.name}>{m.name} — {m.impulseNs} Ns</option>
+                  ))}
+                </optgroup>
                 <option value="__custom">Custom…</option>
               </select>
+              {prof.motor.curve && prof.motor.curve.length > 1 && (
+                <ThrustCurveSpark curve={prof.motor.curve} />
+              )}
+              {importMsg && (
+                <div style={{ fontSize: 11, color: "var(--vx-caution)", fontFamily: "var(--vx-font-mono)" }}>{importMsg}</div>
+              )}
               {isCustomMotor && (
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                   <SimNum label="Total impulse" unit="Ns" step={10} value={prof.motor.impulseNs} onChange={(v) => update({ motor: { ...prof.motor, impulseNs: v, avgThrustN: prof.motor.burnS > 0 ? v / prof.motor.burnS : prof.motor.avgThrustN } })} />

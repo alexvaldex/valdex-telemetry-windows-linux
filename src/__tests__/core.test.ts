@@ -452,3 +452,50 @@ describe("shareable flight replay", () => {
     expect(apo).toBeCloseTo(200, 0);
   });
 });
+
+describe("motor thrust-curve import", () => {
+  const engJ350 = `; Cesaroni J350 test
+J350 38 186 5-10-15 0.192 0.360 Cesaroni
+0.02 420
+0.1 500
+0.5 380
+1.0 360
+1.9 340
+2.0 0
+`;
+  it("parses a RASP .eng into a curve + derived impulse/avg", async () => {
+    const { parseEng } = await import("../telemetry/motorFile");
+    const m = parseEng(engJ350);
+    expect(m.name).toContain("J350");
+    expect(m.propKg).toBeCloseTo(0.192, 3);
+    expect(m.curve!.length).toBeGreaterThan(3);
+    expect(m.burnS).toBeCloseTo(2.0, 2);
+    // Impulse ≈ area under the curve → J class (640–1280 Ns).
+    expect(m.impulseNs).toBeGreaterThan(640);
+    expect(m.impulseNs).toBeLessThan(1280);
+  });
+
+  it("thrustAtTime interpolates and returns 0 after burnout", async () => {
+    const { parseEng } = await import("../telemetry/motorFile");
+    const { thrustAtTime, motorBurnTime } = await import("../telemetry/flightSim");
+    const m = parseEng(engJ350);
+    expect(thrustAtTime(m, 0.06)).toBeGreaterThan(420); // between 420 and 500
+    expect(thrustAtTime(m, 0.06)).toBeLessThan(500);
+    expect(thrustAtTime(m, 3)).toBe(0);
+    expect(motorBurnTime(m)).toBeCloseTo(2.0, 2);
+  });
+
+  it("the real curve changes predicted apogee vs the boxcar average", async () => {
+    const { parseEng } = await import("../telemetry/motorFile");
+    const { simulatePreflight, DEFAULT_SIM_PROFILE } = await import("../telemetry/flightSim");
+    const m = parseEng(engJ350);
+    const withCurve = structuredClone(DEFAULT_SIM_PROFILE);
+    withCurve.motor = m;
+    const boxcar = structuredClone(DEFAULT_SIM_PROFILE);
+    boxcar.motor = { ...m, curve: undefined }; // same impulse, flat thrust
+    const a = simulatePreflight(withCurve).apogeeM;
+    const b = simulatePreflight(boxcar).apogeeM;
+    expect(a).toBeGreaterThan(50);
+    expect(Math.abs(a - b)).toBeGreaterThan(0.5); // the shape actually matters
+  });
+});
